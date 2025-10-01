@@ -1,0 +1,22 @@
+{
+  "name": "temple-law-chat-server",
+  "type": "module",
+  "private": true,
+  "main": "ctlawserver.js",
+  "scripts": {
+    "start": "node ctlawserver.js",
+    "dev": "nodemon ctlawserver.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.2",
+    "cheerio": "^1.0.0-rc.12",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "fast-xml-parser": "^5.2.5",
+    "mongodb": "^6.6.2",
+    "morgan": "^1.10.0",
+    "openai": "^4.56.0",
+    "p-limit": "^5.0.0"
+  }
+}
