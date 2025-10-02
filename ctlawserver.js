@@ -14,10 +14,24 @@ import { collectFromSitemap, indexUrl } from "./indexer.mjs";
 // App setup
 // ---------------------------------------------------------------------
 const app = express();
+
+const allowedOrigins = [
+    "http://localhost:5173",
+    "https://templelawwidget.onrender.com"
+];
+
 app.use(cors({
-    origin: "http://localhost:5173",
+    origin: function (origin, callback) {
+        if (!origin || allowedOrigins.includes(origin)) {
+            callback(null, true);
+        } else {
+            callback(new Error("Not allowed by CORS"));
+        }
+    },
+    credentials: true,
     allowedHeaders: ["Content-Type", "x-admin-token"],
 }));
+
 app.use(express.json({ limit: "2mb" }));
 app.use(morgan("tiny"));
 
@@ -196,7 +210,7 @@ app.post("/reset", async (req, res) => {
 // ---------------------------------------------------------------------
 app.post("/index", async (req, res) => {
     try {
-        const { sitemap = "https://law.temple.edu/sitemap_index.xml", max = 1000 } = req.body || {};
+        const { sitemap = "https://law.temple.edu/sitemap_index.xml", max = 2000 } = req.body || {};
         const db = await getDb();
 
         const deny = [
