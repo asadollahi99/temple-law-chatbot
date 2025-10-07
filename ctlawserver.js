@@ -120,7 +120,21 @@ app.post("/ask", async (req, res) => {
         const retrievalQuery = lastUser ? `${query} (context: ${lastUser.slice(0, 400)})` : query;
 
         // 1) Embed query
-        const qvec = await embed(retrievalQuery);
+        //const qvec = await embed(retrievalQuery);
+
+        // Normalize user question using GPT before embedding
+        const normRes = await axios.post(
+            "https://api.openai.com/v1/responses",
+            {
+                model: "gpt-4o-mini",
+                input: `Rewrite this question in clear, grammatically correct English (keep meaning same): ${query}`
+            },
+            { headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` } }
+        );
+        const normalizedQuery = normRes.data.output_text?.trim() || query;
+        console.log("Normalized query:", normalizedQuery);
+
+        const qvec = await embed(normalizedQuery);
 
         // 2) Prefilter candidate chunks (text index or regex fallback)
         const words = [...new Set(query.toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length >= 3))];
@@ -148,13 +162,27 @@ app.post("/ask", async (req, res) => {
         const ranked = prefilter.map(c => ({
             url: c.url, text: c.text, score: cosine(qvec, c.embedding)
         })).sort((a, b) => b.score - a.score);
-
+        if (ranked[0]?.score < 0.6) {
+            console.warn("Low embedding similarity detected — using keyword fallback for:", query);
+            const keyword = await db.collection("chunks")
+                .find({ text: { $regex: query, $options: "i" } })
+                .project({ text: 1, url: 1, embedding: 1 })
+                .limit(3)
+                .toArray();
+            ranked.push(...keyword.map(k => ({ ...k, score: 0.99 })));
+        }
         const MIN_SIM = 0.2;
-        let top = ranked.filter(r => r.score >= MIN_SIM).slice(0, 6);
-        if (!top.length) top = ranked.slice(0, 6);
+        let top = ranked.filter(r => r.score >= MIN_SIM).slice(0, 12);
+        if (!top.length) top = ranked.slice(0, 12);
 
         const context = top.map((t, i) => `Source ${i + 1}:\n${t.text}\n(URL: ${t.url})`).join("\n\n");
-
+        console.log("Query:", query);
+        console.log("Top retrieved chunks:");
+        for (const r of ranked.slice(0, 10)) {
+            console.log(`→ Score: ${r.score.toFixed(3)} | ${r.url}`);
+            console.log(r.text.slice(0, 200).replace(/\n+/g, " ") + "...");
+        }
+        console.log("Selected top context URLs:", top.map(t => t.url));
         // 4) Call OpenAI (Responses API)
         const system =
             "You are Temple Law’s website assistant. Answer ONLY using the context below (from law.temple.edu). " +
@@ -169,7 +197,7 @@ app.post("/ask", async (req, res) => {
 
         const r = await axios.post(
             "https://api.openai.com/v1/responses",
-            { model: "gpt-4o-mini", input: messages, temperature: 0.2, max_output_tokens: 500 },
+            { model: "gpt-4o", input: messages, temperature: 0.2, max_output_tokens: 500 },
             { headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` } }
         );
 
