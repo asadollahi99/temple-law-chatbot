@@ -48,13 +48,16 @@ function requireAdmin(req, res, next) {
 // ---------------------------------------------------------------------
 // Session helpers (Mongo)
 // ---------------------------------------------------------------------
+import { randomUUID } from "crypto"; // add this near the top of the file
+
 async function appendTurn(db, sid, { role, content, sources = [], meta = {} }) {
     const now = new Date();
+    const mid = randomUUID();
     await db.collection("sessions").updateOne(
         { sid },
         {
             $setOnInsert: { sid, createdAt: now },
-            $push: { history: { role, content, sources, ts: now, ...meta } },
+            $push: { history: { mid, role, content, sources, ts: now, ...meta } },
             $set: { updatedAt: now }
         },
         { upsert: true }
@@ -199,9 +202,12 @@ app.post("/ask", async (req, res) => {
         const synonyms = {
             start: ["begin", "open", "commence"],
             finish: ["end", "close", "complete"],
-            calendar: ["schedule", "term", "semester", "dates"],
-            school: ["classes", "session", "university"],
-            class: ["course", "semester"]
+            refund: ["withdrawal", "reimbursement", "money back"],
+            tuition: ["fees", "payment", "billing", "cost"],
+            academic: ["school", "semester", "classes"],
+            calendar: ["schedule", "term", "dates"],
+            law: ["temple law", "beasley school of law"],
+            policy: ["rule", "procedure", "guideline"],
         };
 
         let expanded = new Set(words);
@@ -300,9 +306,19 @@ app.post("/ask", async (req, res) => {
         const sources = top.map(t => t.url);
 
         // Save assistant turn
-        await appendTurn(db, sid, { role: "assistant", content: answer, sources });
+        const mid = crypto.randomUUID();
+        await db.collection("sessions").updateOne(
+            { sid },
+            {
+                $push: {
+                    history: { mid, role: "assistant", content: answer, sources, ts: new Date() }
+                },
+                $set: { updatedAt: new Date() }
+            },
+            { upsert: true }
+        );
+        return res.json({ sid, answer, sources, mid });
 
-        return res.json({ sid, answer, sources });
     } catch (e) {
         return res.status(500).json({ error: e.message || String(e) });
     }
@@ -318,6 +334,58 @@ app.post("/reset", async (req, res) => {
     await db.collection("sessions").deleteOne({ sid });
     res.json({ ok: true });
 });
+
+// ---------------------------------------------------------------------
+// Feedback endpoint
+// ---------------------------------------------------------------------
+// app.post("/feedback", async (req, res) => {
+//     try {
+//         const { sid, index, correct, comment } = req.body || {};
+//         if (!sid || typeof index !== "number")
+//             return res.status(400).json({ error: "Missing sid or index" });
+
+//         const db = await getDb();
+//         const s = await db.collection("sessions").findOne({ sid });
+//         if (!s) return res.status(404).json({ error: "Session not found" });
+
+//         // Locate target message (index corresponds to its position in history)
+//         const path = `history.${index}.feedback`;
+//         await db.collection("sessions").updateOne(
+//             { sid },
+//             { $set: { [path]: { correct, comment, ts: new Date() } } }
+//         );
+
+//         res.json({ ok: true });
+//     } catch (e) {
+//         res.status(500).json({ error: e.message || String(e) });
+//     }
+// });
+
+
+app.post("/feedback", async (req, res) => {
+    try {
+        const { sid, mid, correct, comment } = req.body;
+        if (!sid || !mid) return res.status(400).json({ error: "Missing sid or mid" });
+
+        const db = await getDb();
+        await db.collection("sessions").updateOne(
+            { sid, "history.mid": mid },
+            {
+                $set: {
+                    "history.$.feedback": {
+                        correct,
+                        comment,
+                        ts: new Date()
+                    }
+                }
+            }
+        );
+        res.json({ ok: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message || String(e) });
+    }
+});
+
 
 // ---------------------------------------------------------------------
 // On-demand sitemap index (manual trigger)
@@ -397,9 +465,28 @@ app.get("/admin/sessions", requireAdmin, async (req, res) => {
                             sid: 1,
                             createdAt: 1,
                             updatedAt: 1,
-                            count: { $size: { $ifNull: ["$history", []] } }
+                            count: { $size: { $ifNull: ["$history", []] } },
+                            correctCount: {
+                                $size: {
+                                    $filter: {
+                                        input: { $ifNull: ["$history", []] },
+                                        as: "h",
+                                        cond: { $eq: ["$$h.feedback.correct", true] }
+                                    }
+                                }
+                            },
+                            incorrectCount: {
+                                $size: {
+                                    $filter: {
+                                        input: { $ifNull: ["$history", []] },
+                                        as: "h",
+                                        cond: { $eq: ["$$h.feedback.correct", false] }
+                                    }
+                                }
+                            }
                         }
                     }
+
                 ],
                 meta: [{ $count: "total" }]
             }
