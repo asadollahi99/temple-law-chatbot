@@ -8,6 +8,7 @@ export async function getDb() {
         client = new MongoClient(process.env.MONGODB_URI);
         await client.connect();
         db = client.db(); // db name is in URI
+        console.log("Connected to DB:", db.databaseName);
         // indexes (helpful for prefilter & joins)
         await db.collection("pages").createIndex({ url: 1 }, { unique: true });
         await db.collection("chunks").createIndex({ url: 1 });

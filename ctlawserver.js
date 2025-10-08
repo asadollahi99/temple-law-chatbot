@@ -117,28 +117,53 @@ app.post("/ask", async (req, res) => {
         // Load short history for conversational grounding
         const history = await loadHistory(db, sid);
         const lastUser = [...history].reverse().find(m => m.role === "user")?.content || "";
-        const retrievalQuery = lastUser ? `${query} (context: ${lastUser.slice(0, 400)})` : query;
+        //const retrievalQuery = lastUser ? `${query} (context: ${lastUser.slice(0, 400)})` : query;
 
         // 1) Embed query
         //const qvec = await embed(retrievalQuery);
 
         // Normalize user question using GPT before embedding
+        // --- Normalize user question ---
         const normRes = await axios.post(
             "https://api.openai.com/v1/responses",
             {
                 model: "gpt-4o-mini",
-                input: `Rewrite this question in clear, grammatically correct English (keep meaning same): ${query}`
+                input: [
+                    {
+                        role: "system",
+                        content: "You are a grammar normalizer. Fix grammar and phrasing but keep meaning identical."
+                    },
+                    {
+                        role: "user",
+                        content: query
+                    }
+                ],
+                temperature: 0
             },
             { headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` } }
         );
-        const normalizedQuery = normRes.data.output_text?.trim() || query;
+
+        const normalizedQuery =
+            normRes.data.output?.[0]?.content?.[0]?.text?.trim() || query;
+
         console.log("Normalized query:", normalizedQuery);
 
         const qvec = await embed(normalizedQuery);
 
         // 2) Prefilter candidate chunks (text index or regex fallback)
-        const words = [...new Set(query.toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length >= 3))];
+        /*const words = [...new Set(query.toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length >= 3))];
         let prefilter = [];
+        // if (words.length) {
+        //     prefilter = await db.collection("chunks")
+        //         .find({ $text: { $search: words.join(" ") } })
+        //         .project({ embedding: 1, text: 1, url: 1 })
+        //         .limit(400)
+        //         .toArray()
+        //         .catch(async () => {
+        //             const or = words.map(w => ({ text: new RegExp(`\\b${w}\\b`, "i") }));
+        //             return db.collection("chunks").find({ $or: or }).limit(400).toArray();
+        //         });
+        // }
         if (words.length) {
             prefilter = await db.collection("chunks")
                 .find({ $text: { $search: words.join(" ") } })
@@ -149,6 +174,67 @@ app.post("/ask", async (req, res) => {
                     const or = words.map(w => ({ text: new RegExp(`\\b${w}\\b`, "i") }));
                     return db.collection("chunks").find({ $or: or }).limit(400).toArray();
                 });
+        }
+
+        //fallback: always include academic calendar pages if question mentions schedule/start
+        const qLower = query.toLowerCase();
+        if (
+            qLower.includes("school start") ||
+            qLower.includes("classes start") ||
+            qLower.includes("semester") ||
+            qLower.includes("academic calendar") ||
+            qLower.includes("term start")
+        ) {
+            const calendarDocs = await db.collection("chunks")
+                .find({ url: { $regex: "academic-calendar", $options: "i" } })
+                .project({ embedding: 1, text: 1, url: 1 })
+                .toArray();
+            prefilter.push(...calendarDocs);
+        }
+        */
+        const words = [...new Set(
+            normalizedQuery.toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length >= 3)
+        )];
+        let prefilter = [];
+        const synonyms = {
+            start: ["begin", "open", "commence"],
+            finish: ["end", "close", "complete"],
+            calendar: ["schedule", "term", "semester", "dates"],
+            school: ["classes", "session", "university"],
+            class: ["course", "semester"]
+        };
+
+        let expanded = new Set(words);
+        for (const w of words) {
+            if (synonyms[w]) synonyms[w].forEach(s => expanded.add(s));
+        }
+
+        // Replace words with expanded set
+        const expandedWords = [...expanded];
+        if (expandedWords.length) {
+            try {
+                prefilter = await db.collection("chunks")
+                    .find({ $text: { $search: expandedWords.join(" ") } })
+                    .project({ embedding: 1, text: 1, url: 1 })
+                    .limit(400)
+                    .toArray();
+            } catch {
+                const or = expandedWords.map(w => ({ text: new RegExp(`\\b${w}\\b`, "i") }));
+                prefilter = await db.collection("chunks").find({ $or: or }).limit(400).toArray();
+            }
+        }
+
+        // Universal semantic fallback
+        // If $text yields too few hits (<30), add extra semantic context pages
+        if (prefilter.length < 30) {
+            const keywordPool = ["academic", "calendar", "semester", "schedule", "start", "dates", "program", "tuition", "policy", "admissions"];
+            const orExtra = keywordPool.map(w => ({ text: new RegExp(`\\b${w}\\b`, "i") }));
+            const extras = await db.collection("chunks")
+                .find({ $or: orExtra })
+                .project({ embedding: 1, text: 1, url: 1 })
+                .limit(100)
+                .toArray();
+            prefilter.push(...extras);
         }
         if (!prefilter.length) {
             prefilter = await db.collection("chunks")
@@ -171,7 +257,7 @@ app.post("/ask", async (req, res) => {
                 .toArray();
             ranked.push(...keyword.map(k => ({ ...k, score: 0.99 })));
         }
-        const MIN_SIM = 0.2;
+        const MIN_SIM = 0.15;
         let top = ranked.filter(r => r.score >= MIN_SIM).slice(0, 12);
         if (!top.length) top = ranked.slice(0, 12);
 
@@ -197,7 +283,7 @@ app.post("/ask", async (req, res) => {
 
         const r = await axios.post(
             "https://api.openai.com/v1/responses",
-            { model: "gpt-4o", input: messages, temperature: 0.2, max_output_tokens: 500 },
+            { model: "gpt-4o-mini", input: messages, temperature: 0.2, max_output_tokens: 500 },
             { headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` } }
         );
 

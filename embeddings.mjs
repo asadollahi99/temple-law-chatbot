@@ -12,8 +12,8 @@ export async function embed(text) {
 }
 
 export function cosine(a, b) {
-    let dot = 0, na = 0, nb = 0;
-    const n = Math.min(a.length, b.length);
-    for (let i = 0; i < n; i++) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
-    return (na && nb) ? dot / (Math.sqrt(na) * Math.sqrt(nb)) : 0;
+    const dot = a.reduce((sum, ai, i) => sum + ai * b[i], 0);
+    const normA = Math.sqrt(a.reduce((sum, ai) => sum + ai * ai, 0));
+    const normB = Math.sqrt(b.reduce((sum, bi) => sum + bi * bi, 0));
+    return dot / (normA * normB);
 }

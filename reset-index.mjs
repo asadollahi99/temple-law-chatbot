@@ -18,7 +18,7 @@ const deny = [
         await db.collection("pages").deleteMany({});
         await db.collection("chunks").deleteMany({});
 
-        console.log("Cleared old pages & chunks ✅");
+        console.log("Cleared old pages & chunks ");
 
         // fetch sitemap URLs
         const urls = (await collectFromSitemap(sitemap, max))
@@ -38,21 +38,21 @@ const deny = [
             } else if (r.status === "denied") {
                 denied++;
                 skippedUrls.push({ url: u, reason: "denied" });
-                console.log(`❌ DENIED: ${u}`);
+                console.log(` DENIED: ${u}`);
             } else if (r.status === "empty") {
                 empty++;
                 skippedUrls.push({ url: u, reason: "empty" });
-                console.log(`⚠️ EMPTY: ${u}`);
+                console.log(` EMPTY: ${u}`);
             } else {
                 other++;
                 skippedUrls.push({ url: u, reason: r.status || "unknown" });
-                console.log(`❓ SKIPPED: ${u} -> ${r.status}`);
+                console.log(` SKIPPED: ${u} -> ${r.status}`);
             }
 
             if (i % 50 === 0) console.log(`Progress: ${i}/${urls.length}`);
         }
 
-        console.log(`\nFinished ✅ 
+        console.log(`\nFinished 
       Total Added: ${added}, 
       Denied: ${denied}, 
       Empty: ${empty}, 
