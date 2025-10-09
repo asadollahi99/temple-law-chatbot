@@ -252,23 +252,50 @@ app.post("/ask", async (req, res) => {
         }
 
         // 3) Rank by cosine & select top
+        // const ranked = prefilter.map(c => ({
+        //     url: c.url, text: c.text, score: cosine(qvec, c.embedding)
+        // })).sort((a, b) => b.score - a.score);
+        // if (ranked[0]?.score < 0.6) {
+        //     console.warn("Low embedding similarity detected — using keyword fallback for:", query);
+        //     const keyword = await db.collection("chunks")
+        //         .find({ text: { $regex: query, $options: "i" } })
+        //         .project({ text: 1, url: 1, embedding: 1 })
+        //         .limit(3)
+        //         .toArray();
+        //     ranked.push(...keyword.map(k => ({ ...k, score: 0.99 })));
+        // }
+        // const MIN_SIM = 0.15;
+        // let top = ranked.filter(r => r.score >= MIN_SIM).slice(0, 12);
+        // if (!top.length) top = ranked.slice(0, 12);
+
+        // const context = top.map((t, i) => `Source ${i + 1}:\n${t.text}\n(URL: ${t.url})`).join("\n\n");
         const ranked = prefilter.map(c => ({
-            url: c.url, text: c.text, score: cosine(qvec, c.embedding)
+            url: c.url,
+            text: c.text,
+            score: cosine(qvec, c.embedding)
         })).sort((a, b) => b.score - a.score);
-        if (ranked[0]?.score < 0.6) {
-            console.warn("Low embedding similarity detected — using keyword fallback for:", query);
+
+        // Log for debug
+        console.log("Top 3 similarity scores:", ranked.slice(0, 3).map(r => r.score.toFixed(3)));
+
+        // If all scores are low (<0.45), fallback to keyword search
+        if (!ranked.length || ranked[0].score < 0.45) {
+            console.warn("Low embedding similarity detected — triggering keyword fallback for:", normalizedQuery);
             const keyword = await db.collection("chunks")
-                .find({ text: { $regex: query, $options: "i" } })
+                .find({ text: { $regex: normalizedQuery, $options: "i" } })
                 .project({ text: 1, url: 1, embedding: 1 })
-                .limit(3)
+                .limit(5)
                 .toArray();
-            ranked.push(...keyword.map(k => ({ ...k, score: 0.99 })));
+            ranked.push(...keyword.map(k => ({ ...k, score: 0.9 })));
         }
-        const MIN_SIM = 0.15;
+
+        // Relaxed threshold for selection
+        const MIN_SIM = 0.12;
         let top = ranked.filter(r => r.score >= MIN_SIM).slice(0, 12);
         if (!top.length) top = ranked.slice(0, 12);
 
-        const context = top.map((t, i) => `Source ${i + 1}:\n${t.text}\n(URL: ${t.url})`).join("\n\n");
+        // Normalize repeated queries: lowercased, trimmed
+        const context = top.map((t, i) => `Source ${i + 1}:\n${t.text.trim().toLowerCase()}\n(URL: ${t.url})`).join("\n\n");
         console.log("Query:", query);
         console.log("Top retrieved chunks:");
         for (const r of ranked.slice(0, 10)) {
