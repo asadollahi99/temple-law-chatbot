@@ -17,7 +17,8 @@ const app = express();
 
 const allowedOrigins = [
     "http://localhost:5173",
-    "https://templelawwidget.onrender.com"
+    "https://templelawwidget.onrender.com",
+    "https://law-dev.temple.edu"
 ];
 
 app.use(cors({
