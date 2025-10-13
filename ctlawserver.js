@@ -651,12 +651,21 @@ app.post("/ask", async (req, res) => {
             { role: "user", content: `Question: ${normalizedQuery}\n\n=== WEBSITE CONTEXT START ===\n${context}\n=== WEBSITE CONTEXT END ===` }
         ];
 
+        // const r = await axios.post(
+        //     "https://api.openai.com/v1/responses",
+        //     { model: "gpt-4o-mini", input: messages, temperature: 0.2, max_output_tokens: 500 },
+        //     { headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` } }
+        // );
         const r = await axios.post(
             "https://api.openai.com/v1/responses",
-            { model: "gpt-4o-mini", input: messages, temperature: 0.2, max_output_tokens: 500 },
+            {
+                model: "gpt-4o-mini",
+                seed: 42,   // <— forces deterministic response if possible
+                temperature: 0,
+                input: messages
+            },
             { headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` } }
         );
-
         const answer =
             r.data.output_text ??
             (Array.isArray(r.data.output)
