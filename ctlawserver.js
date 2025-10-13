@@ -102,6 +102,296 @@ app.get("/stats", async (_req, res) => {
 // ---------------------------------------------------------------------
 // Ask (RAG + session persistence)
 // ---------------------------------------------------------------------
+// app.post("/ask", async (req, res) => {
+//     try {
+//         const { q = "", sid: clientSid } = req.body || {};
+//         const query = (q || "").trim();
+//         if (!query) return res.status(400).json({ error: "Empty question" });
+
+//         const sid = clientSid || crypto.randomUUID();
+//         const db = await getDb();
+
+//         // Save user turn
+//         await appendTurn(db, sid, {
+//             role: "user",
+//             content: query,
+//             meta: { ip: req.ip, ua: req.headers["user-agent"] || "" }
+//         });
+
+//         // ✅ Handle "Explain more" intelligently
+//         let normalizedQuery = query;
+//         if (/^(explain|tell|say)\s+more/i.test(query)) {
+//             // load session history
+//             const s = await db.collection("sessions").findOne({ sid });
+//             if (s?.history?.length) {
+//                 // find last assistant message that had a real answer
+//                 const lastAssistant = [...s.history].reverse().find(
+//                     h => h.role === "assistant" && h.content && !/conversation reset/i.test(h.content)
+//                 );
+//                 const lastUser = [...s.history].reverse().find(
+//                     h => h.role === "user" && h.content && h.content !== query
+//                 );
+
+//                 // combine context
+//                 const context = [
+//                     lastUser?.content ? `Previous question: ${lastUser.content}` : "",
+//                     lastAssistant?.content ? `Previous answer: ${lastAssistant.content}` : ""
+//                 ].filter(Boolean).join("\n");
+
+//                 normalizedQuery = `Please elaborate on the previous topic.\n${context}`;
+//                 console.log("Expanded 'explain more' →", normalizedQuery);
+//             }
+//         }
+
+//         // Load short history for conversational grounding
+//         const history = await loadHistory(db, sid);
+//         const lastUser = [...history].reverse().find(m => m.role === "user")?.content || "";
+//         //const retrievalQuery = lastUser ? `${query} (context: ${lastUser.slice(0, 400)})` : query;
+
+//         // 1) Embed query
+//         //const qvec = await embed(retrievalQuery);
+
+//         // Normalize user question using GPT before embedding
+//         // --- Normalize user question ---
+//         const normRes = await axios.post(
+//             "https://api.openai.com/v1/responses",
+//             {
+//                 model: "gpt-4o-mini",
+//                 input: [
+//                     {
+//                         role: "system",
+//                         content: "You are a grammar normalizer. Fix grammar and phrasing but keep meaning identical."
+//                     },
+//                     {
+//                         role: "user",
+//                         content: query
+//                     }
+//                 ],
+//                 temperature: 0
+//             },
+//             { headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` } }
+//         );
+
+//         const normalizedQuery =
+//             normRes.data.output?.[0]?.content?.[0]?.text?.trim() || query;
+
+//         console.log("Normalized query:", normalizedQuery);
+
+//         const qvec = await embed(normalizedQuery);
+//         if (qvec.length !== 1536) {
+//             console.error("Bad embedding length:", qvec.length);
+//         }
+
+//         // 2) Prefilter candidate chunks (text index or regex fallback)
+//         /*const words = [...new Set(query.toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length >= 3))];
+//         let prefilter = [];
+//         // if (words.length) {
+//         //     prefilter = await db.collection("chunks")
+//         //         .find({ $text: { $search: words.join(" ") } })
+//         //         .project({ embedding: 1, text: 1, url: 1 })
+//         //         .limit(400)
+//         //         .toArray()
+//         //         .catch(async () => {
+//         //             const or = words.map(w => ({ text: new RegExp(`\\b${w}\\b`, "i") }));
+//         //             return db.collection("chunks").find({ $or: or }).limit(400).toArray();
+//         //         });
+//         // }
+//         if (words.length) {
+//             prefilter = await db.collection("chunks")
+//                 .find({ $text: { $search: words.join(" ") } })
+//                 .project({ embedding: 1, text: 1, url: 1 })
+//                 .limit(400)
+//                 .toArray()
+//                 .catch(async () => {
+//                     const or = words.map(w => ({ text: new RegExp(`\\b${w}\\b`, "i") }));
+//                     return db.collection("chunks").find({ $or: or }).limit(400).toArray();
+//                 });
+//         }
+
+//         //fallback: always include academic calendar pages if question mentions schedule/start
+//         const qLower = query.toLowerCase();
+//         if (
+//             qLower.includes("school start") ||
+//             qLower.includes("classes start") ||
+//             qLower.includes("semester") ||
+//             qLower.includes("academic calendar") ||
+//             qLower.includes("term start")
+//         ) {
+//             const calendarDocs = await db.collection("chunks")
+//                 .find({ url: { $regex: "academic-calendar", $options: "i" } })
+//                 .project({ embedding: 1, text: 1, url: 1 })
+//                 .toArray();
+//             prefilter.push(...calendarDocs);
+//         }
+//         */
+//         const words = [...new Set(
+//             normalizedQuery.toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length >= 3)
+//         )];
+//         let prefilter = [];
+//         const synonyms = {
+//             start: ["begin", "open", "commence"],
+//             finish: ["end", "close", "complete"],
+//             refund: ["withdrawal", "reimbursement", "money back"],
+//             tuition: ["fees", "payment", "billing", "cost"],
+//             academic: ["school", "semester", "classes"],
+//             calendar: ["schedule", "term", "dates"],
+//             law: ["temple law", "beasley school of law"],
+//             policy: ["rule", "procedure", "guideline"],
+//         };
+
+//         let expanded = new Set(words);
+//         for (const w of words) {
+//             if (synonyms[w]) synonyms[w].forEach(s => expanded.add(s));
+//         }
+
+//         // Replace words with expanded set
+//         const expandedWords = [...expanded];
+//         if (expandedWords.length) {
+//             try {
+//                 prefilter = await db.collection("chunks")
+//                     .find({ $text: { $search: expandedWords.join(" ") } })
+//                     .project({ embedding: 1, text: 1, url: 1 })
+//                     .limit(400)
+//                     .toArray();
+//             } catch {
+//                 const or = expandedWords.map(w => ({ text: new RegExp(`\\b${w}\\b`, "i") }));
+//                 prefilter = await db.collection("chunks").find({ $or: or }).limit(400).toArray();
+//             }
+//         }
+
+//         // Universal semantic fallback
+//         // If $text yields too few hits (<30), add extra semantic context pages
+//         if (prefilter.length < 30) {
+//             const keywordPool = ["academic", "calendar", "semester", "schedule", "start", "dates", "program", "tuition", "policy", "admissions"];
+//             const orExtra = keywordPool.map(w => ({ text: new RegExp(`\\b${w}\\b`, "i") }));
+//             const extras = await db.collection("chunks")
+//                 .find({ $or: orExtra })
+//                 .project({ embedding: 1, text: 1, url: 1 })
+//                 .limit(100)
+//                 .toArray();
+//             prefilter.push(...extras);
+//         }
+//         if (!prefilter.length) {
+//             prefilter = await db.collection("chunks")
+//                 .find({})
+//                 .project({ embedding: 1, text: 1, url: 1 })
+//                 .limit(400)
+//                 .toArray();
+//         }
+
+//         // 3) Rank by cosine & select top
+//         // const ranked = prefilter.map(c => ({
+//         //     url: c.url, text: c.text, score: cosine(qvec, c.embedding)
+//         // })).sort((a, b) => b.score - a.score);
+//         // if (ranked[0]?.score < 0.6) {
+//         //     console.warn("Low embedding similarity detected — using keyword fallback for:", query);
+//         //     const keyword = await db.collection("chunks")
+//         //         .find({ text: { $regex: query, $options: "i" } })
+//         //         .project({ text: 1, url: 1, embedding: 1 })
+//         //         .limit(3)
+//         //         .toArray();
+//         //     ranked.push(...keyword.map(k => ({ ...k, score: 0.99 })));
+//         // }
+//         // const MIN_SIM = 0.15;
+//         // let top = ranked.filter(r => r.score >= MIN_SIM).slice(0, 12);
+//         // if (!top.length) top = ranked.slice(0, 12);
+
+//         // const context = top.map((t, i) => `Source ${i + 1}:\n${t.text}\n(URL: ${t.url})`).join("\n\n");
+//         const ranked = prefilter.map(c => {
+//             const emb = Array.isArray(c.embedding) ? c.embedding.map(Number) : [];
+//             return {
+//                 url: c.url,
+//                 text: c.text,
+//                 score: cosine(qvec, emb)
+//             };
+//         }).sort((a, b) => b.score - a.score);
+//         const topChunk = prefilter.find(c => c.url?.includes("academic-calendar"));
+//         if (topChunk) {
+//             const test = cosine(qvec, topChunk.embedding.map(Number));
+//             console.log("Cosine with academic-calendar:", test);
+//         }
+//         // const ranked = prefilter.map(c => ({
+//         //     url: c.url,
+//         //     text: c.text,
+//         //     score: cosine(qvec, c.embedding)
+//         // })).sort((a, b) => b.score - a.score);
+
+//         // Log for debug
+//         console.log("Top 3 similarity scores:", ranked.slice(0, 3).map(r => r.score.toFixed(3)));
+
+//         // If all scores are low (<0.45), fallback to keyword search
+//         if (!ranked.length || ranked[0].score < 0.45) {
+//             console.warn("Low embedding similarity detected — triggering keyword fallback for:", normalizedQuery);
+//             const keyword = await db.collection("chunks")
+//                 .find({ text: { $regex: normalizedQuery, $options: "i" } })
+//                 .project({ text: 1, url: 1, embedding: 1 })
+//                 .limit(5)
+//                 .toArray();
+//             ranked.push(...keyword.map(k => ({ ...k, score: 0.9 })));
+//         }
+
+//         // Relaxed threshold for selection
+//         const MIN_SIM = 0.12;
+//         let top = ranked.filter(r => r.score >= MIN_SIM).slice(0, 12);
+//         if (!top.length) top = ranked.slice(0, 12);
+
+//         // Normalize repeated queries: lowercased, trimmed
+//         const context = top.map((t, i) => `Source ${i + 1}:\n${t.text.trim().toLowerCase()}\n(URL: ${t.url})`).join("\n\n");
+//         console.log("Query:", query);
+//         console.log("Top retrieved chunks:");
+//         for (const r of ranked.slice(0, 10)) {
+//             console.log(`→ Score: ${r.score.toFixed(3)} | ${r.url}`);
+//             console.log(r.text.slice(0, 200).replace(/\n+/g, " ") + "...");
+//         }
+//         console.log("Selected top context URLs:", top.map(t => t.url));
+//         // 4) Call OpenAI (Responses API)
+//         const system =
+//             "You are Temple Law’s website assistant. Answer ONLY using the context below (from law.temple.edu). " +
+//             "If the answer isn't present, say you don’t know and suggest the closest relevant Temple Law page. " +
+//             "Always cite the page URLs in parentheses.";
+
+//         const messages = [
+//             { role: "system", content: system },
+//             ...history.map(h => ({ role: h.role, content: h.content })),
+//             { role: "user", content: `Question: ${query}\n\n=== WEBSITE CONTEXT START ===\n${context}\n=== WEBSITE CONTEXT END ===` }
+//         ];
+
+//         const r = await axios.post(
+//             "https://api.openai.com/v1/responses",
+//             { model: "gpt-4o-mini", input: messages, temperature: 0.2, max_output_tokens: 500 },
+//             { headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` } }
+//         );
+
+//         const answer =
+//             r.data.output_text ??
+//             (Array.isArray(r.data.output)
+//                 ? r.data.output.map(o =>
+//                     Array.isArray(o.content) ? o.content.map(c => (c.text ?? "")).join("") : ""
+//                 ).join("\n")
+//                 : "") ??
+//             (r.data.choices && r.data.choices[0]?.message?.content) ??
+//             "I couldn't find relevant info in the provided pages.";
+
+//         const sources = top.map(t => t.url);
+
+//         // Save assistant turn
+//         const mid = crypto.randomUUID();
+//         await db.collection("sessions").updateOne(
+//             { sid },
+//             {
+//                 $push: {
+//                     history: { mid, role: "assistant", content: answer, sources, ts: new Date() }
+//                 },
+//                 $set: { updatedAt: new Date() }
+//             },
+//             { upsert: true }
+//         );
+//         return res.json({ sid, answer, sources, mid });
+
+//     } catch (e) {
+//         return res.status(500).json({ error: e.message || String(e) });
+//     }
+// });
 app.post("/ask", async (req, res) => {
     try {
         const { q = "", sid: clientSid } = req.body || {};
@@ -118,16 +408,32 @@ app.post("/ask", async (req, res) => {
             meta: { ip: req.ip, ua: req.headers["user-agent"] || "" }
         });
 
+        // ✅ STEP 1: Handle "Explain more" intelligently
+        let expandedQuery = query;
+        if (/^(explain|tell|say)\s+more/i.test(query)) {
+            const s = await db.collection("sessions").findOne({ sid });
+            if (s?.history?.length) {
+                const lastAssistant = [...s.history].reverse().find(
+                    h => h.role === "assistant" && h.content && !/conversation reset/i.test(h.content)
+                );
+                const lastUser = [...s.history].reverse().find(
+                    h => h.role === "user" && h.content && h.content !== query
+                );
+
+                const context = [
+                    lastUser?.content ? `Previous question: ${lastUser.content}` : "",
+                    lastAssistant?.content ? `Previous answer: ${lastAssistant.content}` : ""
+                ].filter(Boolean).join("\n");
+
+                expandedQuery = `Please elaborate on the previous topic.\n${context}`;
+                console.log("Expanded 'explain more' →", expandedQuery);
+            }
+        }
+
         // Load short history for conversational grounding
         const history = await loadHistory(db, sid);
-        const lastUser = [...history].reverse().find(m => m.role === "user")?.content || "";
-        //const retrievalQuery = lastUser ? `${query} (context: ${lastUser.slice(0, 400)})` : query;
 
-        // 1) Embed query
-        //const qvec = await embed(retrievalQuery);
-
-        // Normalize user question using GPT before embedding
-        // --- Normalize user question ---
+        // ✅ STEP 2: Normalize user query (grammar fix) but KEEP expanded meaning
         const normRes = await axios.post(
             "https://api.openai.com/v1/responses",
             {
@@ -139,7 +445,7 @@ app.post("/ask", async (req, res) => {
                     },
                     {
                         role: "user",
-                        content: query
+                        content: expandedQuery
                     }
                 ],
                 temperature: 0
@@ -148,60 +454,21 @@ app.post("/ask", async (req, res) => {
         );
 
         const normalizedQuery =
-            normRes.data.output?.[0]?.content?.[0]?.text?.trim() || query;
+            normRes.data.output?.[0]?.content?.[0]?.text?.trim() || expandedQuery;
 
         console.log("Normalized query:", normalizedQuery);
 
+        // ✅ STEP 3: Embed normalized (and expanded if needed) query
         const qvec = await embed(normalizedQuery);
         if (qvec.length !== 1536) {
             console.error("Bad embedding length:", qvec.length);
         }
 
-        // 2) Prefilter candidate chunks (text index or regex fallback)
-        /*const words = [...new Set(query.toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length >= 3))];
-        let prefilter = [];
-        // if (words.length) {
-        //     prefilter = await db.collection("chunks")
-        //         .find({ $text: { $search: words.join(" ") } })
-        //         .project({ embedding: 1, text: 1, url: 1 })
-        //         .limit(400)
-        //         .toArray()
-        //         .catch(async () => {
-        //             const or = words.map(w => ({ text: new RegExp(`\\b${w}\\b`, "i") }));
-        //             return db.collection("chunks").find({ $or: or }).limit(400).toArray();
-        //         });
-        // }
-        if (words.length) {
-            prefilter = await db.collection("chunks")
-                .find({ $text: { $search: words.join(" ") } })
-                .project({ embedding: 1, text: 1, url: 1 })
-                .limit(400)
-                .toArray()
-                .catch(async () => {
-                    const or = words.map(w => ({ text: new RegExp(`\\b${w}\\b`, "i") }));
-                    return db.collection("chunks").find({ $or: or }).limit(400).toArray();
-                });
-        }
-
-        //fallback: always include academic calendar pages if question mentions schedule/start
-        const qLower = query.toLowerCase();
-        if (
-            qLower.includes("school start") ||
-            qLower.includes("classes start") ||
-            qLower.includes("semester") ||
-            qLower.includes("academic calendar") ||
-            qLower.includes("term start")
-        ) {
-            const calendarDocs = await db.collection("chunks")
-                .find({ url: { $regex: "academic-calendar", $options: "i" } })
-                .project({ embedding: 1, text: 1, url: 1 })
-                .toArray();
-            prefilter.push(...calendarDocs);
-        }
-        */
+        // ✅ STEP 4: Keyword expansion for retrieval
         const words = [...new Set(
             normalizedQuery.toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length >= 3)
         )];
+
         let prefilter = [];
         const synonyms = {
             start: ["begin", "open", "commence"],
@@ -219,7 +486,6 @@ app.post("/ask", async (req, res) => {
             if (synonyms[w]) synonyms[w].forEach(s => expanded.add(s));
         }
 
-        // Replace words with expanded set
         const expandedWords = [...expanded];
         if (expandedWords.length) {
             try {
@@ -234,10 +500,27 @@ app.post("/ask", async (req, res) => {
             }
         }
 
-        // Universal semantic fallback
-        // If $text yields too few hits (<30), add extra semantic context pages
+        // ✅ STEP 5: Add semantic fallback if too few hits
+        // if (prefilter.length < 30) {
+        //     const keywordPool = [
+        //         "academic", "calendar", "semester", "schedule",
+        //         "start", "dates", "program", "tuition", "policy", "admissions"
+        //     ];
+        //     const orExtra = keywordPool.map(w => ({ text: new RegExp(`\\b${w}\\b`, "i") }));
+        //     const extras = await db.collection("chunks")
+        //         .find({ $or: orExtra })
+        //         .project({ embedding: 1, text: 1, url: 1 })
+        //         .limit(100)
+        //         .toArray();
+        //     prefilter.push(...extras);
+        // }
+        // ✅ If too few matches, add contextually relevant fallback pages
         if (prefilter.length < 30) {
-            const keywordPool = ["academic", "calendar", "semester", "schedule", "start", "dates", "program", "tuition", "policy", "admissions"];
+            const keywordPool = [
+                "academic", "calendar", "semester", "schedule",
+                "start", "dates", "program", "tuition", "policy", "admissions",
+                "environmental", "energy", "climate", "sustainability", "law"
+            ];
             const orExtra = keywordPool.map(w => ({ text: new RegExp(`\\b${w}\\b`, "i") }));
             const extras = await db.collection("chunks")
                 .find({ $or: orExtra })
@@ -246,6 +529,25 @@ app.post("/ask", async (req, res) => {
                 .toArray();
             prefilter.push(...extras);
         }
+
+        // ✅ Force-include Environmental Law page if relevant
+        const qLower = normalizedQuery.toLowerCase();
+        if (
+            qLower.includes("environmental law") ||
+            qLower.includes("energy") ||
+            qLower.includes("climate") ||
+            qLower.includes("sustainability")
+        ) {
+            const envDocs = await db.collection("chunks")
+                .find({ url: { $regex: "environmental-law", $options: "i" } })
+                .project({ embedding: 1, text: 1, url: 1 })
+                .toArray();
+            if (envDocs.length) {
+                console.log(`✅ Injected ${envDocs.length} Environmental Law chunks.`);
+                prefilter.push(...envDocs);
+            }
+        }
+
         if (!prefilter.length) {
             prefilter = await db.collection("chunks")
                 .find({})
@@ -254,24 +556,7 @@ app.post("/ask", async (req, res) => {
                 .toArray();
         }
 
-        // 3) Rank by cosine & select top
-        // const ranked = prefilter.map(c => ({
-        //     url: c.url, text: c.text, score: cosine(qvec, c.embedding)
-        // })).sort((a, b) => b.score - a.score);
-        // if (ranked[0]?.score < 0.6) {
-        //     console.warn("Low embedding similarity detected — using keyword fallback for:", query);
-        //     const keyword = await db.collection("chunks")
-        //         .find({ text: { $regex: query, $options: "i" } })
-        //         .project({ text: 1, url: 1, embedding: 1 })
-        //         .limit(3)
-        //         .toArray();
-        //     ranked.push(...keyword.map(k => ({ ...k, score: 0.99 })));
-        // }
-        // const MIN_SIM = 0.15;
-        // let top = ranked.filter(r => r.score >= MIN_SIM).slice(0, 12);
-        // if (!top.length) top = ranked.slice(0, 12);
-
-        // const context = top.map((t, i) => `Source ${i + 1}:\n${t.text}\n(URL: ${t.url})`).join("\n\n");
+        // ✅ STEP 6: Rank by cosine similarity
         const ranked = prefilter.map(c => {
             const emb = Array.isArray(c.embedding) ? c.embedding.map(Number) : [];
             return {
@@ -280,55 +565,90 @@ app.post("/ask", async (req, res) => {
                 score: cosine(qvec, emb)
             };
         }).sort((a, b) => b.score - a.score);
-        const topChunk = prefilter.find(c => c.url?.includes("academic-calendar"));
-        if (topChunk) {
-            const test = cosine(qvec, topChunk.embedding.map(Number));
-            console.log("Cosine with academic-calendar:", test);
-        }
-        // const ranked = prefilter.map(c => ({
-        //     url: c.url,
-        //     text: c.text,
-        //     score: cosine(qvec, c.embedding)
-        // })).sort((a, b) => b.score - a.score);
 
-        // Log for debug
         console.log("Top 3 similarity scores:", ranked.slice(0, 3).map(r => r.score.toFixed(3)));
 
-        // If all scores are low (<0.45), fallback to keyword search
-        if (!ranked.length || ranked[0].score < 0.45) {
-            console.warn("Low embedding similarity detected — triggering keyword fallback for:", normalizedQuery);
-            const keyword = await db.collection("chunks")
-                .find({ text: { $regex: normalizedQuery, $options: "i" } })
-                .project({ text: 1, url: 1, embedding: 1 })
-                .limit(5)
-                .toArray();
-            ranked.push(...keyword.map(k => ({ ...k, score: 0.9 })));
-        }
+        // ✅ STEP 7: Fallback for low-similarity queries
+        // if (!ranked.length || ranked[0].score < 0.45) {
+        //     console.warn("Low embedding similarity detected — triggering keyword fallback for:", normalizedQuery);
+        //     const keyword = await db.collection("chunks")
+        //         .find({ text: { $regex: normalizedQuery, $options: "i" } })
+        //         .project({ text: 1, url: 1, embedding: 1 })
+        //         .limit(5)
+        //         .toArray();
+        //     ranked.push(...keyword.map(k => ({ ...k, score: 0.9 })));
+        // }
 
-        // Relaxed threshold for selection
+        // ✅ SMART FALLBACK: deep retrieval if repeated low-similarity
+        if (!ranked.length || ranked[0].score < 0.45) {
+            console.warn("Low embedding similarity detected — triggering deep retrieval for:", normalizedQuery);
+
+            // Look at previous assistant turn — if last answer was also "I don't know", we go deep
+            const session = await db.collection("sessions").findOne({ sid });
+            const lastAssistant = [...(session?.history || [])].reverse().find(h => h.role === "assistant");
+
+            let deepMode = false;
+            if (lastAssistant && /i don't know/i.test(lastAssistant.content)) {
+                deepMode = true;
+                console.log("🧭 Deep retrieval mode activated — expanding search to entire law.temple.edu index");
+            }
+
+            // If deepMode: search entire collection (not limited prefilter)
+            let fallbackDocs = [];
+            if (deepMode) {
+                fallbackDocs = await db.collection("chunks")
+                    .find({ text: { $regex: ".", $options: "i" } }) // match all
+                    .project({ text: 1, url: 1, embedding: 1 })
+                    .limit(1500)
+                    .toArray();
+            } else {
+                fallbackDocs = await db.collection("chunks")
+                    .find({ text: { $regex: normalizedQuery, $options: "i" } })
+                    .project({ text: 1, url: 1, embedding: 1 })
+                    .limit(100)
+                    .toArray();
+            }
+
+            // Rank and merge into main set
+            const rescored = fallbackDocs.map(doc => ({
+                url: doc.url,
+                text: doc.text,
+                score: cosine(qvec, doc.embedding.map(Number))
+            }));
+            ranked.push(...rescored.sort((a, b) => b.score - a.score).slice(0, 15));
+
+            // Optional: annotate in the logs
+            console.log(`Deep retrieval results: ${ranked.length} chunks re-ranked.`);
+        }
         const MIN_SIM = 0.12;
         let top = ranked.filter(r => r.score >= MIN_SIM).slice(0, 12);
         if (!top.length) top = ranked.slice(0, 12);
 
-        // Normalize repeated queries: lowercased, trimmed
-        const context = top.map((t, i) => `Source ${i + 1}:\n${t.text.trim().toLowerCase()}\n(URL: ${t.url})`).join("\n\n");
+        const context = top.map(
+            (t, i) => `Source ${i + 1}:\n${t.text.trim().toLowerCase()}\n(URL: ${t.url})`
+        ).join("\n\n");
+
         console.log("Query:", query);
         console.log("Top retrieved chunks:");
         for (const r of ranked.slice(0, 10)) {
             console.log(`→ Score: ${r.score.toFixed(3)} | ${r.url}`);
             console.log(r.text.slice(0, 200).replace(/\n+/g, " ") + "...");
         }
-        console.log("Selected top context URLs:", top.map(t => t.url));
-        // 4) Call OpenAI (Responses API)
-        const system =
-            "You are Temple Law’s website assistant. Answer ONLY using the context below (from law.temple.edu). " +
-            "If the answer isn't present, say you don’t know and suggest the closest relevant Temple Law page. " +
-            "Always cite the page URLs in parentheses.";
+
+        // ✅ STEP 8: Generate answer using OpenAI
+        // const system =
+        //     "You are Temple Law’s website assistant. Answer ONLY using the context below (from law.temple.edu). " +
+        //     "If the answer isn't present, say you don’t know and suggest the closest relevant Temple Law page. " +
+        //     "Always cite the page URLs in parentheses.";
+        const system = "You are Temple Law’s website assistant.Answer ONLY using the context below (from law.temple.edu).\
+                        If the context seems insufficient, search across the full law.temple.edu website(already indexed) before saying you don't know. \
+                        If still missing, suggest the most relevant Temple Law page or section."
+
 
         const messages = [
             { role: "system", content: system },
             ...history.map(h => ({ role: h.role, content: h.content })),
-            { role: "user", content: `Question: ${query}\n\n=== WEBSITE CONTEXT START ===\n${context}\n=== WEBSITE CONTEXT END ===` }
+            { role: "user", content: `Question: ${normalizedQuery}\n\n=== WEBSITE CONTEXT START ===\n${context}\n=== WEBSITE CONTEXT END ===` }
         ];
 
         const r = await axios.post(
@@ -341,7 +661,9 @@ app.post("/ask", async (req, res) => {
             r.data.output_text ??
             (Array.isArray(r.data.output)
                 ? r.data.output.map(o =>
-                    Array.isArray(o.content) ? o.content.map(c => (c.text ?? "")).join("") : ""
+                    Array.isArray(o.content)
+                        ? o.content.map(c => c.text ?? "").join("")
+                        : ""
                 ).join("\n")
                 : "") ??
             (r.data.choices && r.data.choices[0]?.message?.content) ??
@@ -349,7 +671,7 @@ app.post("/ask", async (req, res) => {
 
         const sources = top.map(t => t.url);
 
-        // Save assistant turn
+        // ✅ STEP 9: Save assistant turn
         const mid = crypto.randomUUID();
         await db.collection("sessions").updateOne(
             { sid },
@@ -361,6 +683,7 @@ app.post("/ask", async (req, res) => {
             },
             { upsert: true }
         );
+
         return res.json({ sid, answer, sources, mid });
 
     } catch (e) {
