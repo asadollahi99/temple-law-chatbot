@@ -660,12 +660,18 @@ app.post("/ask", async (req, res) => {
             "https://api.openai.com/v1/responses",
             {
                 model: "gpt-4o-mini",
-                seed: 42,   // <— forces deterministic response if possible
-                temperature: 0,
-                input: messages
+                input: messages,
+                temperature: 0.2,
+                max_output_tokens: 500,
             },
-            { headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` } }
+            {
+                headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+                },
+            }
         );
+
         const answer =
             r.data.output_text ??
             (Array.isArray(r.data.output)
