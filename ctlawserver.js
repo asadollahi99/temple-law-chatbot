@@ -153,6 +153,9 @@ app.post("/ask", async (req, res) => {
         console.log("Normalized query:", normalizedQuery);
 
         const qvec = await embed(normalizedQuery);
+        if (qvec.length !== 1536) {
+            console.error("Bad embedding length:", qvec.length);
+        }
 
         // 2) Prefilter candidate chunks (text index or regex fallback)
         /*const words = [...new Set(query.toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length >= 3))];
@@ -269,11 +272,24 @@ app.post("/ask", async (req, res) => {
         // if (!top.length) top = ranked.slice(0, 12);
 
         // const context = top.map((t, i) => `Source ${i + 1}:\n${t.text}\n(URL: ${t.url})`).join("\n\n");
-        const ranked = prefilter.map(c => ({
-            url: c.url,
-            text: c.text,
-            score: cosine(qvec, c.embedding)
-        })).sort((a, b) => b.score - a.score);
+        const ranked = prefilter.map(c => {
+            const emb = Array.isArray(c.embedding) ? c.embedding.map(Number) : [];
+            return {
+                url: c.url,
+                text: c.text,
+                score: cosine(qvec, emb)
+            };
+        }).sort((a, b) => b.score - a.score);
+        const topChunk = prefilter.find(c => c.url?.includes("academic-calendar"));
+        if (topChunk) {
+            const test = cosine(qvec, topChunk.embedding.map(Number));
+            console.log("Cosine with academic-calendar:", test);
+        }
+        // const ranked = prefilter.map(c => ({
+        //     url: c.url,
+        //     text: c.text,
+        //     score: cosine(qvec, c.embedding)
+        // })).sort((a, b) => b.score - a.score);
 
         // Log for debug
         console.log("Top 3 similarity scores:", ranked.slice(0, 3).map(r => r.score.toFixed(3)));
