@@ -19,6 +19,11 @@ export async function getDb() {
         await db.collection("sessions").createIndex({ sid: 1 }, { unique: true });
         await db.collection("sessions").createIndex({ updatedAt: -1 });
         await db.collection("sessions").createIndex({ "history.content": "text" }); // text search
+
+        await db.collection("faq_overrides").createIndex({ question: "text" });
+        await db.collection("faq_overrides").createIndex({ createdAt: -1 });
+
+
     }
     return db;
 }
