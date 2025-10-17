@@ -1,5 +1,6 @@
 // server/index.mjs
-import dotenv from "dotenv"; dotenv.config();
+import dotenv from "dotenv";
+dotenv.config();
 import express from "express";
 import morgan from "morgan";
 import axios from "axios";
@@ -49,8 +50,7 @@ function requireAdmin(req, res, next) {
 // ---------------------------------------------------------------------
 // Session helpers (Mongo)
 // ---------------------------------------------------------------------
-import { randomUUID } from "crypto"; // add this near the top of the file
-
+import { randomUUID } from "crypto"; // Node's crypto randomUUID
 async function appendTurn(db, sid, { role, content, sources = [], meta = {} }) {
     const now = new Date();
     const mid = randomUUID();
@@ -78,7 +78,26 @@ async function loadHistory(db, sid) {
     await db.collection("sessions").createIndex({ updatedAt: -1 });
     await db.collection("sessions").createIndex({ "history.content": "text" });
     await db.collection("chunks").createIndex({ text: "text" }).catch(() => { });
+    // safe helper to convert id to ObjectId or return null if invali
+
 })();
+
+// Add these imports near the top with your other imports
+import { ObjectId } from "mongodb";
+
+// Safe helper (place this once near the top, BEFORE any routes)
+function toObjectId(id) {
+    if (!id) return null;
+    try {
+        // tolerate objects like { $oid: "..." } or raw string id
+        if (typeof id === "object" && id !== null && id.$oid) id = id.$oid;
+        if (typeof id !== "string") id = String(id);
+        if (!ObjectId.isValid(id)) return null;
+        return new ObjectId(id);
+    } catch (err) {
+        return null;
+    }
+}
 
 // ---------------------------------------------------------------------
 // Health & Stats
@@ -102,625 +121,6 @@ app.get("/stats", async (_req, res) => {
 // ---------------------------------------------------------------------
 // Ask (RAG + session persistence)
 // ---------------------------------------------------------------------
-// app.post("/ask", async (req, res) => {
-//     try {
-//         const { q = "", sid: clientSid } = req.body || {};
-//         const query = (q || "").trim();
-//         if (!query) return res.status(400).json({ error: "Empty question" });
-
-//         const sid = clientSid || crypto.randomUUID();
-//         const db = await getDb();
-
-//         // Save user turn
-//         await appendTurn(db, sid, {
-//             role: "user",
-//             content: query,
-//             meta: { ip: req.ip, ua: req.headers["user-agent"] || "" }
-//         });
-
-//         // ✅ Handle "Explain more" intelligently
-//         let normalizedQuery = query;
-//         if (/^(explain|tell|say)\s+more/i.test(query)) {
-//             // load session history
-//             const s = await db.collection("sessions").findOne({ sid });
-//             if (s?.history?.length) {
-//                 // find last assistant message that had a real answer
-//                 const lastAssistant = [...s.history].reverse().find(
-//                     h => h.role === "assistant" && h.content && !/conversation reset/i.test(h.content)
-//                 );
-//                 const lastUser = [...s.history].reverse().find(
-//                     h => h.role === "user" && h.content && h.content !== query
-//                 );
-
-//                 // combine context
-//                 const context = [
-//                     lastUser?.content ? `Previous question: ${lastUser.content}` : "",
-//                     lastAssistant?.content ? `Previous answer: ${lastAssistant.content}` : ""
-//                 ].filter(Boolean).join("\n");
-
-//                 normalizedQuery = `Please elaborate on the previous topic.\n${context}`;
-//                 console.log("Expanded 'explain more' →", normalizedQuery);
-//             }
-//         }
-
-//         // Load short history for conversational grounding
-//         const history = await loadHistory(db, sid);
-//         const lastUser = [...history].reverse().find(m => m.role === "user")?.content || "";
-//         //const retrievalQuery = lastUser ? `${query} (context: ${lastUser.slice(0, 400)})` : query;
-
-//         // 1) Embed query
-//         //const qvec = await embed(retrievalQuery);
-
-//         // Normalize user question using GPT before embedding
-//         // --- Normalize user question ---
-//         const normRes = await axios.post(
-//             "https://api.openai.com/v1/responses",
-//             {
-//                 model: "gpt-4o-mini",
-//                 input: [
-//                     {
-//                         role: "system",
-//                         content: "You are a grammar normalizer. Fix grammar and phrasing but keep meaning identical."
-//                     },
-//                     {
-//                         role: "user",
-//                         content: query
-//                     }
-//                 ],
-//                 temperature: 0
-//             },
-//             { headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` } }
-//         );
-
-//         const normalizedQuery =
-//             normRes.data.output?.[0]?.content?.[0]?.text?.trim() || query;
-
-//         console.log("Normalized query:", normalizedQuery);
-
-//         const qvec = await embed(normalizedQuery);
-//         if (qvec.length !== 1536) {
-//             console.error("Bad embedding length:", qvec.length);
-//         }
-
-//         // 2) Prefilter candidate chunks (text index or regex fallback)
-//         /*const words = [...new Set(query.toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length >= 3))];
-//         let prefilter = [];
-//         // if (words.length) {
-//         //     prefilter = await db.collection("chunks")
-//         //         .find({ $text: { $search: words.join(" ") } })
-//         //         .project({ embedding: 1, text: 1, url: 1 })
-//         //         .limit(400)
-//         //         .toArray()
-//         //         .catch(async () => {
-//         //             const or = words.map(w => ({ text: new RegExp(`\\b${w}\\b`, "i") }));
-//         //             return db.collection("chunks").find({ $or: or }).limit(400).toArray();
-//         //         });
-//         // }
-//         if (words.length) {
-//             prefilter = await db.collection("chunks")
-//                 .find({ $text: { $search: words.join(" ") } })
-//                 .project({ embedding: 1, text: 1, url: 1 })
-//                 .limit(400)
-//                 .toArray()
-//                 .catch(async () => {
-//                     const or = words.map(w => ({ text: new RegExp(`\\b${w}\\b`, "i") }));
-//                     return db.collection("chunks").find({ $or: or }).limit(400).toArray();
-//                 });
-//         }
-
-//         //fallback: always include academic calendar pages if question mentions schedule/start
-//         const qLower = query.toLowerCase();
-//         if (
-//             qLower.includes("school start") ||
-//             qLower.includes("classes start") ||
-//             qLower.includes("semester") ||
-//             qLower.includes("academic calendar") ||
-//             qLower.includes("term start")
-//         ) {
-//             const calendarDocs = await db.collection("chunks")
-//                 .find({ url: { $regex: "academic-calendar", $options: "i" } })
-//                 .project({ embedding: 1, text: 1, url: 1 })
-//                 .toArray();
-//             prefilter.push(...calendarDocs);
-//         }
-//         */
-//         const words = [...new Set(
-//             normalizedQuery.toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length >= 3)
-//         )];
-//         let prefilter = [];
-//         const synonyms = {
-//             start: ["begin", "open", "commence"],
-//             finish: ["end", "close", "complete"],
-//             refund: ["withdrawal", "reimbursement", "money back"],
-//             tuition: ["fees", "payment", "billing", "cost"],
-//             academic: ["school", "semester", "classes"],
-//             calendar: ["schedule", "term", "dates"],
-//             law: ["temple law", "beasley school of law"],
-//             policy: ["rule", "procedure", "guideline"],
-//         };
-
-//         let expanded = new Set(words);
-//         for (const w of words) {
-//             if (synonyms[w]) synonyms[w].forEach(s => expanded.add(s));
-//         }
-
-//         // Replace words with expanded set
-//         const expandedWords = [...expanded];
-//         if (expandedWords.length) {
-//             try {
-//                 prefilter = await db.collection("chunks")
-//                     .find({ $text: { $search: expandedWords.join(" ") } })
-//                     .project({ embedding: 1, text: 1, url: 1 })
-//                     .limit(400)
-//                     .toArray();
-//             } catch {
-//                 const or = expandedWords.map(w => ({ text: new RegExp(`\\b${w}\\b`, "i") }));
-//                 prefilter = await db.collection("chunks").find({ $or: or }).limit(400).toArray();
-//             }
-//         }
-
-//         // Universal semantic fallback
-//         // If $text yields too few hits (<30), add extra semantic context pages
-//         if (prefilter.length < 30) {
-//             const keywordPool = ["academic", "calendar", "semester", "schedule", "start", "dates", "program", "tuition", "policy", "admissions"];
-//             const orExtra = keywordPool.map(w => ({ text: new RegExp(`\\b${w}\\b`, "i") }));
-//             const extras = await db.collection("chunks")
-//                 .find({ $or: orExtra })
-//                 .project({ embedding: 1, text: 1, url: 1 })
-//                 .limit(100)
-//                 .toArray();
-//             prefilter.push(...extras);
-//         }
-//         if (!prefilter.length) {
-//             prefilter = await db.collection("chunks")
-//                 .find({})
-//                 .project({ embedding: 1, text: 1, url: 1 })
-//                 .limit(400)
-//                 .toArray();
-//         }
-
-//         // 3) Rank by cosine & select top
-//         // const ranked = prefilter.map(c => ({
-//         //     url: c.url, text: c.text, score: cosine(qvec, c.embedding)
-//         // })).sort((a, b) => b.score - a.score);
-//         // if (ranked[0]?.score < 0.6) {
-//         //     console.warn("Low embedding similarity detected — using keyword fallback for:", query);
-//         //     const keyword = await db.collection("chunks")
-//         //         .find({ text: { $regex: query, $options: "i" } })
-//         //         .project({ text: 1, url: 1, embedding: 1 })
-//         //         .limit(3)
-//         //         .toArray();
-//         //     ranked.push(...keyword.map(k => ({ ...k, score: 0.99 })));
-//         // }
-//         // const MIN_SIM = 0.15;
-//         // let top = ranked.filter(r => r.score >= MIN_SIM).slice(0, 12);
-//         // if (!top.length) top = ranked.slice(0, 12);
-
-//         // const context = top.map((t, i) => `Source ${i + 1}:\n${t.text}\n(URL: ${t.url})`).join("\n\n");
-//         const ranked = prefilter.map(c => {
-//             const emb = Array.isArray(c.embedding) ? c.embedding.map(Number) : [];
-//             return {
-//                 url: c.url,
-//                 text: c.text,
-//                 score: cosine(qvec, emb)
-//             };
-//         }).sort((a, b) => b.score - a.score);
-//         const topChunk = prefilter.find(c => c.url?.includes("academic-calendar"));
-//         if (topChunk) {
-//             const test = cosine(qvec, topChunk.embedding.map(Number));
-//             console.log("Cosine with academic-calendar:", test);
-//         }
-//         // const ranked = prefilter.map(c => ({
-//         //     url: c.url,
-//         //     text: c.text,
-//         //     score: cosine(qvec, c.embedding)
-//         // })).sort((a, b) => b.score - a.score);
-
-//         // Log for debug
-//         console.log("Top 3 similarity scores:", ranked.slice(0, 3).map(r => r.score.toFixed(3)));
-
-//         // If all scores are low (<0.45), fallback to keyword search
-//         if (!ranked.length || ranked[0].score < 0.45) {
-//             console.warn("Low embedding similarity detected — triggering keyword fallback for:", normalizedQuery);
-//             const keyword = await db.collection("chunks")
-//                 .find({ text: { $regex: normalizedQuery, $options: "i" } })
-//                 .project({ text: 1, url: 1, embedding: 1 })
-//                 .limit(5)
-//                 .toArray();
-//             ranked.push(...keyword.map(k => ({ ...k, score: 0.9 })));
-//         }
-
-//         // Relaxed threshold for selection
-//         const MIN_SIM = 0.12;
-//         let top = ranked.filter(r => r.score >= MIN_SIM).slice(0, 12);
-//         if (!top.length) top = ranked.slice(0, 12);
-
-//         // Normalize repeated queries: lowercased, trimmed
-//         const context = top.map((t, i) => `Source ${i + 1}:\n${t.text.trim().toLowerCase()}\n(URL: ${t.url})`).join("\n\n");
-//         console.log("Query:", query);
-//         console.log("Top retrieved chunks:");
-//         for (const r of ranked.slice(0, 10)) {
-//             console.log(`→ Score: ${r.score.toFixed(3)} | ${r.url}`);
-//             console.log(r.text.slice(0, 200).replace(/\n+/g, " ") + "...");
-//         }
-//         console.log("Selected top context URLs:", top.map(t => t.url));
-//         // 4) Call OpenAI (Responses API)
-//         const system =
-//             "You are Temple Law’s website assistant. Answer ONLY using the context below (from law.temple.edu). " +
-//             "If the answer isn't present, say you don’t know and suggest the closest relevant Temple Law page. " +
-//             "Always cite the page URLs in parentheses.";
-
-//         const messages = [
-//             { role: "system", content: system },
-//             ...history.map(h => ({ role: h.role, content: h.content })),
-//             { role: "user", content: `Question: ${query}\n\n=== WEBSITE CONTEXT START ===\n${context}\n=== WEBSITE CONTEXT END ===` }
-//         ];
-
-//         const r = await axios.post(
-//             "https://api.openai.com/v1/responses",
-//             { model: "gpt-4o-mini", input: messages, temperature: 0.2, max_output_tokens: 500 },
-//             { headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` } }
-//         );
-
-//         const answer =
-//             r.data.output_text ??
-//             (Array.isArray(r.data.output)
-//                 ? r.data.output.map(o =>
-//                     Array.isArray(o.content) ? o.content.map(c => (c.text ?? "")).join("") : ""
-//                 ).join("\n")
-//                 : "") ??
-//             (r.data.choices && r.data.choices[0]?.message?.content) ??
-//             "I couldn't find relevant info in the provided pages.";
-
-//         const sources = top.map(t => t.url);
-
-//         // Save assistant turn
-//         const mid = crypto.randomUUID();
-//         await db.collection("sessions").updateOne(
-//             { sid },
-//             {
-//                 $push: {
-//                     history: { mid, role: "assistant", content: answer, sources, ts: new Date() }
-//                 },
-//                 $set: { updatedAt: new Date() }
-//             },
-//             { upsert: true }
-//         );
-//         return res.json({ sid, answer, sources, mid });
-
-//     } catch (e) {
-//         return res.status(500).json({ error: e.message || String(e) });
-//     }
-// });
-// app.post("/ask", async (req, res) => {
-//     try {
-//         const override = await db.collection("faq_overrides").findOne(
-//             { $text: { $search: query } },
-//             { projection: { answer: 1 } }
-//         );
-//         if (override) {
-//             console.log("Returning reviewed override answer for:", query);
-//             const mid = crypto.randomUUID();
-//             await appendTurn(db, sid, {
-//                 role: "assistant",
-//                 content: override.answer,
-//                 sources: ["Reviewed Answer"],
-//                 meta: { override: true }
-//             });
-//             return res.json({ sid, answer: override.answer, sources: ["Reviewed Answer"], mid });
-//         }
-//         const { q = "", sid: clientSid } = req.body || {};
-//         const query = (q || "").trim();
-//         if (!query) return res.status(400).json({ error: "Empty question" });
-
-//         const sid = clientSid || crypto.randomUUID();
-//         const db = await getDb();
-
-//         // Save user turn
-//         await appendTurn(db, sid, {
-//             role: "user",
-//             content: query,
-//             meta: { ip: req.ip, ua: req.headers["user-agent"] || "" }
-//         });
-
-//         // ✅ STEP 1: Handle "Explain more" intelligently
-//         let expandedQuery = query;
-//         if (/^(explain|tell|say)\s+more/i.test(query)) {
-//             const s = await db.collection("sessions").findOne({ sid });
-//             if (s?.history?.length) {
-//                 const lastAssistant = [...s.history].reverse().find(
-//                     h => h.role === "assistant" && h.content && !/conversation reset/i.test(h.content)
-//                 );
-//                 const lastUser = [...s.history].reverse().find(
-//                     h => h.role === "user" && h.content && h.content !== query
-//                 );
-
-//                 const context = [
-//                     lastUser?.content ? `Previous question: ${lastUser.content}` : "",
-//                     lastAssistant?.content ? `Previous answer: ${lastAssistant.content}` : ""
-//                 ].filter(Boolean).join("\n");
-
-//                 expandedQuery = `Please elaborate on the previous topic.\n${context}`;
-//                 console.log("Expanded 'explain more' →", expandedQuery);
-//             }
-//         }
-
-//         // Load short history for conversational grounding
-//         const history = await loadHistory(db, sid);
-
-//         //  STEP 2: Normalize user query (grammar fix) but KEEP expanded meaning
-//         const normRes = await axios.post(
-//             "https://api.openai.com/v1/responses",
-//             {
-//                 model: "gpt-4o-mini",
-//                 input: [
-//                     {
-//                         role: "system",
-//                         content: "You are a grammar normalizer. Fix grammar and phrasing but keep meaning identical."
-//                     },
-//                     {
-//                         role: "user",
-//                         content: expandedQuery
-//                     }
-//                 ],
-//                 temperature: 0
-//             },
-//             { headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` } }
-//         );
-
-//         const normalizedQuery =
-//             normRes.data.output?.[0]?.content?.[0]?.text?.trim() || expandedQuery;
-
-//         console.log("Normalized query:", normalizedQuery);
-
-//         // STEP 3: Embed normalized (and expanded if needed) query
-//         const qvec = await embed(normalizedQuery);
-//         if (qvec.length !== 1536) {
-//             console.error("Bad embedding length:", qvec.length);
-//         }
-
-//         //  STEP 4: Keyword expansion for retrieval
-//         const words = [...new Set(
-//             normalizedQuery.toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length >= 3)
-//         )];
-
-//         let prefilter = [];
-//         const synonyms = {
-//             start: ["begin", "open", "commence"],
-//             finish: ["end", "close", "complete"],
-//             refund: ["withdrawal", "reimbursement", "money back"],
-//             tuition: ["fees", "payment", "billing", "cost"],
-//             academic: ["school", "semester", "classes"],
-//             calendar: ["schedule", "term", "dates"],
-//             law: ["temple law", "beasley school of law"],
-//             policy: ["rule", "procedure", "guideline"],
-//         };
-
-//         let expanded = new Set(words);
-//         for (const w of words) {
-//             if (synonyms[w]) synonyms[w].forEach(s => expanded.add(s));
-//         }
-
-//         const expandedWords = [...expanded];
-//         if (expandedWords.length) {
-//             try {
-//                 prefilter = await db.collection("chunks")
-//                     .find({ $text: { $search: expandedWords.join(" ") } })
-//                     .project({ embedding: 1, text: 1, url: 1 })
-//                     .limit(400)
-//                     .toArray();
-//             } catch {
-//                 const or = expandedWords.map(w => ({ text: new RegExp(`\\b${w}\\b`, "i") }));
-//                 prefilter = await db.collection("chunks").find({ $or: or }).limit(400).toArray();
-//             }
-//         }
-
-//         //  STEP 5: Add semantic fallback if too few hits
-//         // if (prefilter.length < 30) {
-//         //     const keywordPool = [
-//         //         "academic", "calendar", "semester", "schedule",
-//         //         "start", "dates", "program", "tuition", "policy", "admissions"
-//         //     ];
-//         //     const orExtra = keywordPool.map(w => ({ text: new RegExp(`\\b${w}\\b`, "i") }));
-//         //     const extras = await db.collection("chunks")
-//         //         .find({ $or: orExtra })
-//         //         .project({ embedding: 1, text: 1, url: 1 })
-//         //         .limit(100)
-//         //         .toArray();
-//         //     prefilter.push(...extras);
-//         // }
-//         //  If too few matches, add contextually relevant fallback pages
-//         if (prefilter.length < 30) {
-//             const keywordPool = [
-//                 "academic", "calendar", "semester", "schedule",
-//                 "start", "dates", "program", "tuition", "policy", "admissions",
-//                 "environmental", "energy", "climate", "sustainability", "law"
-//             ];
-//             const orExtra = keywordPool.map(w => ({ text: new RegExp(`\\b${w}\\b`, "i") }));
-//             const extras = await db.collection("chunks")
-//                 .find({ $or: orExtra })
-//                 .project({ embedding: 1, text: 1, url: 1 })
-//                 .limit(100)
-//                 .toArray();
-//             prefilter.push(...extras);
-//         }
-
-//         //  Force-include Environmental Law page if relevant
-//         const qLower = normalizedQuery.toLowerCase();
-//         if (
-//             qLower.includes("environmental law") ||
-//             qLower.includes("energy") ||
-//             qLower.includes("climate") ||
-//             qLower.includes("sustainability")
-//         ) {
-//             const envDocs = await db.collection("chunks")
-//                 .find({ url: { $regex: "environmental-law", $options: "i" } })
-//                 .project({ embedding: 1, text: 1, url: 1 })
-//                 .toArray();
-//             if (envDocs.length) {
-//                 console.log(`✅ Injected ${envDocs.length} Environmental Law chunks.`);
-//                 prefilter.push(...envDocs);
-//             }
-//         }
-
-//         if (!prefilter.length) {
-//             prefilter = await db.collection("chunks")
-//                 .find({})
-//                 .project({ embedding: 1, text: 1, url: 1 })
-//                 .limit(400)
-//                 .toArray();
-//         }
-
-//         //  STEP 6: Rank by cosine similarity
-//         const ranked = prefilter.map(c => {
-//             const emb = Array.isArray(c.embedding) ? c.embedding.map(Number) : [];
-//             return {
-//                 url: c.url,
-//                 text: c.text,
-//                 score: cosine(qvec, emb)
-//             };
-//         }).sort((a, b) => b.score - a.score);
-
-//         console.log("Top 3 similarity scores:", ranked.slice(0, 3).map(r => r.score.toFixed(3)));
-
-//         //  STEP 7: Fallback for low-similarity queries
-//         // if (!ranked.length || ranked[0].score < 0.45) {
-//         //     console.warn("Low embedding similarity detected — triggering keyword fallback for:", normalizedQuery);
-//         //     const keyword = await db.collection("chunks")
-//         //         .find({ text: { $regex: normalizedQuery, $options: "i" } })
-//         //         .project({ text: 1, url: 1, embedding: 1 })
-//         //         .limit(5)
-//         //         .toArray();
-//         //     ranked.push(...keyword.map(k => ({ ...k, score: 0.9 })));
-//         // }
-
-//         //  SMART FALLBACK: deep retrieval if repeated low-similarity
-//         if (!ranked.length || ranked[0].score < 0.45) {
-//             console.warn("Low embedding similarity detected — triggering deep retrieval for:", normalizedQuery);
-
-//             // Look at previous assistant turn — if last answer was also "I don't know", we go deep
-//             const session = await db.collection("sessions").findOne({ sid });
-//             const lastAssistant = [...(session?.history || [])].reverse().find(h => h.role === "assistant");
-
-//             let deepMode = false;
-//             if (lastAssistant && /i don't know/i.test(lastAssistant.content)) {
-//                 deepMode = true;
-//                 console.log("Deep retrieval mode activated — expanding search to entire law.temple.edu index");
-//             }
-
-//             // If deepMode: search entire collection (not limited prefilter)
-//             let fallbackDocs = [];
-//             if (deepMode) {
-//                 fallbackDocs = await db.collection("chunks")
-//                     .find({ text: { $regex: ".", $options: "i" } }) // match all
-//                     .project({ text: 1, url: 1, embedding: 1 })
-//                     .limit(1500)
-//                     .toArray();
-//             } else {
-//                 fallbackDocs = await db.collection("chunks")
-//                     .find({ text: { $regex: normalizedQuery, $options: "i" } })
-//                     .project({ text: 1, url: 1, embedding: 1 })
-//                     .limit(100)
-//                     .toArray();
-//             }
-
-//             // Rank and merge into main set
-//             const rescored = fallbackDocs.map(doc => ({
-//                 url: doc.url,
-//                 text: doc.text,
-//                 score: cosine(qvec, doc.embedding.map(Number))
-//             }));
-//             ranked.push(...rescored.sort((a, b) => b.score - a.score).slice(0, 15));
-
-//             // Optional: annotate in the logs
-//             console.log(`Deep retrieval results: ${ranked.length} chunks re-ranked.`);
-//         }
-//         const MIN_SIM = 0.12;
-//         let top = ranked.filter(r => r.score >= MIN_SIM).slice(0, 12);
-//         if (!top.length) top = ranked.slice(0, 12);
-
-//         const context = top.map(
-//             (t, i) => `Source ${i + 1}:\n${t.text.trim().toLowerCase()}\n(URL: ${t.url})`
-//         ).join("\n\n");
-
-//         console.log("Query:", query);
-//         console.log("Top retrieved chunks:");
-//         for (const r of ranked.slice(0, 10)) {
-//             console.log(`→ Score: ${r.score.toFixed(3)} | ${r.url}`);
-//             console.log(r.text.slice(0, 200).replace(/\n+/g, " ") + "...");
-//         }
-
-//         //  STEP 8: Generate answer using OpenAI
-//         // const system =
-//         //     "You are Temple Law’s website assistant. Answer ONLY using the context below (from law.temple.edu). " +
-//         //     "If the answer isn't present, say you don’t know and suggest the closest relevant Temple Law page. " +
-//         //     "Always cite the page URLs in parentheses.";
-//         const system = "You are Temple Law’s website assistant.Answer ONLY using the context below (from law.temple.edu).\
-//                         If the context seems insufficient, search across the full law.temple.edu website(already indexed) before saying you don't know. \
-//                         If still missing, suggest the most relevant Temple Law page or section."
-
-
-//         const messages = [
-//             { role: "system", content: system },
-//             ...history.map(h => ({ role: h.role, content: h.content })),
-//             { role: "user", content: `Question: ${normalizedQuery}\n\n=== WEBSITE CONTEXT START ===\n${context}\n=== WEBSITE CONTEXT END ===` }
-//         ];
-
-//         // const r = await axios.post(
-//         //     "https://api.openai.com/v1/responses",
-//         //     { model: "gpt-4o-mini", input: messages, temperature: 0.2, max_output_tokens: 500 },
-//         //     { headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` } }
-//         // );
-//         const r = await axios.post(
-//             "https://api.openai.com/v1/responses",
-//             {
-//                 model: "gpt-4o-mini",
-//                 input: messages,
-//                 temperature: 0.2,
-//                 max_output_tokens: 500,
-//             },
-//             {
-//                 headers: {
-//                     "Content-Type": "application/json",
-//                     Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-//                 },
-//             }
-//         );
-
-//         const answer =
-//             r.data.output_text ??
-//             (Array.isArray(r.data.output)
-//                 ? r.data.output.map(o =>
-//                     Array.isArray(o.content)
-//                         ? o.content.map(c => c.text ?? "").join("")
-//                         : ""
-//                 ).join("\n")
-//                 : "") ??
-//             (r.data.choices && r.data.choices[0]?.message?.content) ??
-//             "I couldn't find relevant info in the provided pages.";
-
-//         const sources = top.map(t => t.url);
-
-//         //  STEP 9: Save assistant turn
-//         const mid = crypto.randomUUID();
-//         await db.collection("sessions").updateOne(
-//             { sid },
-//             {
-//                 $push: {
-//                     history: { mid, role: "assistant", content: answer, sources, ts: new Date() }
-//                 },
-//                 $set: { updatedAt: new Date() }
-//             },
-//             { upsert: true }
-//         );
-
-//         return res.json({ sid, answer, sources, mid });
-
-//     } catch (e) {
-//         return res.status(500).json({ error: e.message || String(e) });
-//     }
-// });
-// IMPORTANT: replace your existing /ask handler with this block
 app.post("/ask", async (req, res) => {
     try {
         // read incoming body early and normalize
@@ -777,7 +177,7 @@ app.post("/ask", async (req, res) => {
         const qvec = await embed(normalizedQuery);
         if (qvec.length !== 1536) console.warn("Unexpected embedding length:", qvec.length);
 
-        // STEP: keyword expansion and prefilter (unchanged)
+        // STEP: keyword expansion and prefilter
         const words = [...new Set(normalizedQuery.toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length >= 3))];
         const synonyms = { start: ["begin", "open", "commence"], finish: ["end", "close"], tuition: ["fees", "billing"], academic: ["school", "semester", "classes"], calendar: ["schedule", "term", "dates"], law: ["temple law", "beasley school of law"], policy: ["rule", "procedure"] };
         let expanded = new Set(words);
@@ -806,7 +206,7 @@ app.post("/ask", async (req, res) => {
             prefilter.push(...extras);
         }
 
-        // Force include environmental docs if relevant (unchanged)
+        // Force include environmental docs if relevant
         const qLower = normalizedQuery.toLowerCase();
         if (qLower.includes("environmental law") || qLower.includes("energy") || qLower.includes("climate") || qLower.includes("sustainability")) {
             const envDocs = await db.collection("chunks").find({ url: { $regex: "environmental-law", $options: "i" } }).project({ embedding: 1, text: 1, url: 1 }).toArray();
@@ -858,32 +258,61 @@ app.post("/ask", async (req, res) => {
         }
 
         // Decision constants
-        const SITE_THRESHOLD = 0.45;               // your existing threshold for trusting site content
-        const OVERRIDE_EMB_THRESHOLD = 0.82;      // semantic similarity threshold to match admin override
-        const normQuery = query.trim().toLowerCase();
-        const topScore = ranked?.[0]?.score ?? 0;
+        const SITE_THRESHOLD = 0.45;
+        const OVERRIDE_EMB_THRESHOLD = 0.82;
 
-        // 1) Try exact normalized question match
+        // normalize query (ensure same normalization used when saving overrides)
+        const normQuery = (query || "").trim().toLowerCase();
+
+        // ensure topScore numeric
+        const topScore = Number(ranked?.[0]?.score ?? 0);
+
+        // safe mid generator
+        const makeMid = () => {
+            if (crypto && typeof crypto.randomUUID === "function") return crypto.randomUUID();
+            return `${Date.now()}-${Math.floor(Math.random() * 1e9)}`;
+        };
+
+        // 1) exact normalized match / force check
         let overrideDoc = null;
+
         try {
-            overrideDoc = await db.collection("faq_overrides").findOne(
-                { normQuestion: normQuery },
-                { projection: { answer: 1, force: 1, reviewer: 1, questionEmbedding: 1, question: 1 } }
-            );
+            const overridesCol = db.collection("faq_overrides");
+            const escapeRegex = s => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+            const qRegex = new RegExp(`^${escapeRegex((normQuery || "").trim())}$`, "i");
+
+            // try normalized field first, then question
+            overrideDoc = await overridesCol.findOne({ normQuestion: { $regex: qRegex } })
+                || await overridesCol.findOne({ question: { $regex: qRegex } });
+
+            console.log("overrideDoc (force-check):", overrideDoc ? { question: overrideDoc.question, force: overrideDoc.force } : null);
+
+            if (overrideDoc && overrideDoc.force === true && (overrideDoc.answer || overrideDoc.assistantContent)) {
+                const answer = overrideDoc.answer ?? overrideDoc.assistantContent;
+
+                console.log("Returning forced override answer for:", normQuery, "answer:", answer?.slice?.(0, 120));
+                const mid = makeMid();
+                const sources = ["Reviewed Answer"];
+
+                // write assistant turn to sessions
+                await appendTurn(db, sid, { role: "assistant", content: answer, sources, meta: { override: true, reviewer: overrideDoc.reviewer, forced: true } });
+
+                return res.json({ sid, answer, sources, mid });
+            }
         } catch (err) {
-            console.warn("Override lookup (exact) failed:", err);
-            overrideDoc = null;
+            console.error("Override force-check error:", err);
+            // fall through to normal flow
         }
 
-        // 2) If not found exactly, try semantic matching against admin overrides (embedding)
+        // 2) semantic matching fallback (only run if no exact override matched)
         if (!overrideDoc) {
             try {
-                // fetch candidates that have embeddings (small collection expected)
                 const candidates = await db.collection("faq_overrides")
                     .find({ questionEmbedding: { $exists: true } })
-                    .project({ answer: 1, force: 1, reviewer: 1, questionEmbedding: 1, question: 1 })
+                    .project({ assistantContent: 1, answer: 1, force: 1, reviewer: 1, questionEmbedding: 1, question: 1 })
                     .toArray();
 
+                console.log("Semantic override candidates:", candidates.length);
                 if (candidates.length && Array.isArray(qvec)) {
                     let best = null;
                     for (const c of candidates) {
@@ -892,8 +321,10 @@ app.post("/ask", async (req, res) => {
                         const sim = cosine(qvec, emb);
                         if (!best || sim > best.sim) best = { doc: c, sim };
                     }
+                    if (best) {
+                        console.log("Best semantic override sim:", best.sim.toFixed(3), "question:", best.doc.question);
+                    }
                     if (best && best.sim >= OVERRIDE_EMB_THRESHOLD) {
-                        console.log(`Matched override semantically (sim=${best.sim.toFixed(3)}):`, best.doc.question);
                         overrideDoc = best.doc;
                     } else {
                         console.log("No semantic override match (best sim):", best ? best.sim.toFixed(3) : "n/a");
@@ -904,16 +335,16 @@ app.post("/ask", async (req, res) => {
             }
         }
 
-        // Logging for debugging
+        // debug logs
         console.log("normQuery:", normQuery);
-        console.log("Top chunk score:", topScore.toFixed(3));
+        console.log("Top chunk score:", topScore.toFixed ? topScore.toFixed(3) : topScore);
         console.log("overrideDoc (final):", overrideDoc ? { question: overrideDoc.question, force: overrideDoc.force } : null);
 
-        // Decision rules (force first)
+        // Decision rules: ONLY return an override when force === true.
         if (overrideDoc && overrideDoc.force) {
             console.log("Using forced override for:", normQuery);
-            const answer = overrideDoc.answer;
-            const mid = crypto.randomUUID();
+            const answer = overrideDoc.answer ?? overrideDoc.assistantContent;
+            const mid = makeMid();
             await appendTurn(db, sid, { role: "assistant", content: answer, sources: ["Reviewed Answer"], meta: { override: true, reviewer: overrideDoc.reviewer, forced: true } });
             return res.json({ sid, answer, sources: ["Reviewed Answer"], mid });
         }
@@ -922,16 +353,13 @@ app.post("/ask", async (req, res) => {
         if (topScore >= SITE_THRESHOLD) {
             console.log("Site confident — using RAG/LLM answer (override not applied).");
         } else {
-            // site not confident: use override if exists
+            // site not confident but override is NOT forced -> DO NOT automatically return override.
             if (overrideDoc) {
-                console.log("Site not confident — using admin override.");
-                const answer = overrideDoc.answer;
-                const mid = crypto.randomUUID();
-                await appendTurn(db, sid, { role: "assistant", content: answer, sources: ["Reviewed Answer"], meta: { override: true, reviewer: overrideDoc.reviewer, forced: !!overrideDoc.force } });
-                return res.json({ sid, answer, sources: ["Reviewed Answer"], mid });
+                console.log("Site not confident and admin override exists but is not forced. Continuing to RAG/LLM pipeline (override will not be auto-applied).");
+            } else {
+                console.log("Site not confident and no admin override — proceeding with RAG/LLM pipeline.");
             }
         }
-        // else continue to LLM generation
 
         // STEP: Generate answer using OpenAI (system + history + context)
         const system = "You are Temple Law’s website assistant. Answer ONLY using the context below (from law.temple.edu). If the context seems insufficient, search across the full law.temple.edu website (already indexed) before saying you don't know. If still missing, suggest the most relevant Temple Law page or section.";
@@ -965,9 +393,11 @@ app.post("/ask", async (req, res) => {
             },
             { upsert: true }
         );
+
         console.log("normQuery:", normQuery);
         console.log("Top chunk score:", (topScore || 0).toFixed(3));
         console.log("overrideDoc (db lookup):", overrideDoc);
+
         return res.json({ sid, answer, sources, mid });
 
     } catch (e) {
@@ -976,15 +406,9 @@ app.post("/ask", async (req, res) => {
     }
 });
 
-
 // ---------------------------------------------------------------------
 // Review
 // ---------------------------------------------------------------------
-// ---------------------------------------------------------------------
-// Reviwe (correct a chat answer)
-// ---------------------------------------------------------------------
-// Admin review/save corrected answer (upsert with optional force flag)
-// server: ctlawserver.js (or wherever /review is defined)
 app.post("/review", requireAdmin, async (req, res) => {
     try {
         const { question, correctedAnswer, force = false, sid, assistantMid, assistantContent } = req.body || {};
@@ -998,7 +422,7 @@ app.post("/review", requireAdmin, async (req, res) => {
         // compute an embedding for the normalized question so we can do semantic lookup later
         let questionEmbedding = null;
         try {
-            questionEmbedding = await embed(norm); // you already have embed() in your codebase
+            questionEmbedding = await embed(norm);
         } catch (err) {
             console.warn("Question embedding failed (proceeding without embedding):", err.message || err);
             questionEmbedding = null;
@@ -1031,11 +455,8 @@ app.post("/review", requireAdmin, async (req, res) => {
     }
 });
 
-
-
 // ---------------------------------------------------------------------
 // Reset (delete a session)
-// ---------------------------------------------------------------------
 app.post("/reset", async (req, res) => {
     const { sid } = req.body || {};
     if (!sid) return res.json({ ok: true });
@@ -1044,33 +465,7 @@ app.post("/reset", async (req, res) => {
     res.json({ ok: true });
 });
 
-// ---------------------------------------------------------------------
-// Feedback endpoint
-// ---------------------------------------------------------------------
-// app.post("/feedback", async (req, res) => {
-//     try {
-//         const { sid, index, correct, comment } = req.body || {};
-//         if (!sid || typeof index !== "number")
-//             return res.status(400).json({ error: "Missing sid or index" });
-
-//         const db = await getDb();
-//         const s = await db.collection("sessions").findOne({ sid });
-//         if (!s) return res.status(404).json({ error: "Session not found" });
-
-//         // Locate target message (index corresponds to its position in history)
-//         const path = `history.${index}.feedback`;
-//         await db.collection("sessions").updateOne(
-//             { sid },
-//             { $set: { [path]: { correct, comment, ts: new Date() } } }
-//         );
-
-//         res.json({ ok: true });
-//     } catch (e) {
-//         res.status(500).json({ error: e.message || String(e) });
-//     }
-// });
-
-
+// Feedback endpoint (existing)
 app.post("/feedback", async (req, res) => {
     try {
         const { sid, mid, correct, comment } = req.body;
@@ -1095,10 +490,7 @@ app.post("/feedback", async (req, res) => {
     }
 });
 
-
-// ---------------------------------------------------------------------
-// On-demand sitemap index (manual trigger)
-// ---------------------------------------------------------------------
+// Indexing endpoint (unchanged)
 app.post("/index", async (req, res) => {
     try {
         const { sitemap = "https://law.temple.edu/sitemap_index.xml", max = 2000 } = req.body || {};
@@ -1129,9 +521,7 @@ app.post("/index", async (req, res) => {
     }
 });
 
-// ---------------------------------------------------------------------
-// History & Admin
-// ---------------------------------------------------------------------
+// Admin/history endpoints (unchanged)
 app.get("/history", async (req, res) => {
     try {
         const sid = (req.query.sid || "").trim();
@@ -1144,7 +534,6 @@ app.get("/history", async (req, res) => {
     }
 });
 
-// List sessions (paged, filterable)
 app.get("/admin/sessions", requireAdmin, async (req, res) => {
     const db = await getDb();
     const { q = "", from = "", to = "", limit = "25", skip = "0" } = req.query;
@@ -1195,7 +584,6 @@ app.get("/admin/sessions", requireAdmin, async (req, res) => {
                             }
                         }
                     }
-
                 ],
                 meta: [{ $count: "total" }]
             }
@@ -1207,7 +595,6 @@ app.get("/admin/sessions", requireAdmin, async (req, res) => {
     res.json({ total, limit: L, skip: S, rows: out?.rows || [] });
 });
 
-// Get one session (full history)
 app.get("/admin/session/:sid", requireAdmin, async (req, res) => {
     const db = await getDb();
     const doc = await db.collection("sessions").findOne({ sid: req.params.sid });
@@ -1215,7 +602,6 @@ app.get("/admin/session/:sid", requireAdmin, async (req, res) => {
     res.json({ sid: doc.sid, createdAt: doc.createdAt, updatedAt: doc.updatedAt, history: doc.history || [] });
 });
 
-// Export all sessions as NDJSON
 app.get("/admin/export.ndjson", requireAdmin, async (req, res) => {
     const db = await getDb();
     res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
@@ -1224,11 +610,219 @@ app.get("/admin/export.ndjson", requireAdmin, async (req, res) => {
     res.end();
 });
 
-// Delete one session
 app.delete("/admin/session/:sid", requireAdmin, async (req, res) => {
     const db = await getDb();
     const r = await db.collection("sessions").deleteOne({ sid: req.params.sid });
     res.json({ ok: true, deleted: r.deletedCount || 0 });
+});
+
+// GET /admin/overrides
+app.get("/admin/overrides", requireAdmin, async (req, res) => {
+    try {
+        const db = await getDb();
+        const q = (req.query.q || "").trim();
+        const filter = {};
+        if (q) filter.$text = { $search: q };
+        const out = await db.collection("faq_overrides")
+            .find(filter)
+            .project({ question: 1, normQuestion: 1, answer: 1, assistantContent: 1, force: 1, reviewer: 1, updatedAt: 1, createdAt: 1, sid: 1 })
+            .sort({ updatedAt: -1 })
+            .limit(500)
+            .toArray();
+        res.json({ ok: true, rows: out });
+    } catch (e) {
+        console.error("GET /admin/overrides error:", e);
+        res.status(500).json({ error: e.message || String(e) });
+    }
+});
+
+// GET /admin/override/:id
+app.get("/admin/override/:id", requireAdmin, async (req, res) => {
+    try {
+        const id = req.params.id;
+        if (!id) return res.status(400).json({ error: "Missing id" });
+
+        const oid = toObjectId(id);
+        if (!oid) return res.status(400).json({ error: "Invalid id" });
+
+        const db = await getDb();
+        const doc = await db.collection("faq_overrides").findOne({ _id: oid });
+        if (!doc) return res.status(404).json({ error: "Not found" });
+        res.json({ ok: true, doc });
+    } catch (e) {
+        console.error("GET /admin/override/:id error:", e);
+        res.status(500).json({ error: e.message || String(e) });
+    }
+});
+
+// POST /admin/override (create/upsert by normQuestion)
+app.post("/admin/override", requireAdmin, async (req, res) => {
+    try {
+        const { question, answer, assistantContent = null, force = false, reviewer = null, sid = null } = req.body || {};
+        if (!question || !answer) return res.status(400).json({ error: "Missing question or answer" });
+
+        const db = await getDb();
+        const clean = question.trim();
+        const norm = clean.toLowerCase();
+        const now = new Date();
+
+        let questionEmbedding = null;
+        try { questionEmbedding = await embed(norm); } catch (err) { /* continue without embedding */ }
+
+        const setDoc = {
+            question: clean,
+            normQuestion: norm,
+            answer,
+            assistantContent: assistantContent || null,
+            reviewer: reviewer || req.adminUser || "admin",
+            force: !!force,
+            sid: sid || null,
+            updatedAt: now,
+            ...(questionEmbedding ? { questionEmbedding } : {})
+        };
+
+        await db.collection("faq_overrides").updateOne(
+            { normQuestion: norm },
+            { $set: setDoc, $setOnInsert: { createdAt: now } },
+            { upsert: true }
+        );
+
+        res.json({ ok: true });
+    } catch (e) {
+        console.error("POST /admin/override error:", e);
+        res.status(500).json({ error: e.message || String(e) });
+    }
+});
+
+// PATCH /admin/override/:id
+app.patch("/admin/override/:id", requireAdmin, async (req, res) => {
+    try {
+        const id = req.params.id;
+        if (!id) return res.status(400).json({ error: "Missing id" });
+
+        const oid = toObjectId(id);
+        if (!oid) return res.status(400).json({ error: "Invalid id" });
+
+        const { question, answer, assistantContent, force, reviewer, sid } = req.body || {};
+        const db = await getDb();
+
+        const set = {};
+        if (typeof question === "string" && question.trim()) {
+            set.question = question.trim();
+            set.normQuestion = question.trim().toLowerCase();
+        }
+        if (typeof answer === "string") set.answer = answer;
+        if (typeof assistantContent === "string") set.assistantContent = assistantContent;
+        if (typeof force !== "undefined") set.force = !!force;
+        if (typeof reviewer !== "undefined") set.reviewer = reviewer;
+        if (typeof sid !== "undefined") set.sid = sid;
+        if (!Object.keys(set).length) return res.status(400).json({ error: "Nothing to update" });
+
+        if (set.normQuestion) {
+            try {
+                const emb = await embed(set.normQuestion);
+                if (Array.isArray(emb) && emb.length) set.questionEmbedding = emb;
+            } catch (err) { /* ignore embedding failure */ }
+        }
+
+        set.updatedAt = new Date();
+        await db.collection("faq_overrides").updateOne({ _id: oid }, { $set: set });
+
+        const doc = await db.collection("faq_overrides").findOne({ _id: oid });
+        res.json({ ok: true, doc });
+    } catch (e) {
+        console.error("PATCH /admin/override/:id error:", e);
+        res.status(500).json({ error: e.message || String(e) });
+    }
+});
+
+// DELETE /admin/override/:id
+app.delete("/admin/override/:id", requireAdmin, async (req, res) => {
+    try {
+        const id = req.params.id;
+        if (!id) return res.status(400).json({ error: "Missing id" });
+
+        const oid = toObjectId(id);
+        if (!oid) return res.status(400).json({ error: "Invalid id" });
+
+        const db = await getDb();
+        const r = await db.collection("faq_overrides").deleteOne({ _id: oid });
+        res.json({ ok: true, deleted: r.deletedCount || 0 });
+    } catch (e) {
+        console.error("DELETE /admin/override/:id error:", e);
+        res.status(500).json({ error: e.message || String(e) });
+    }
+});
+// POST /admin/compare-models
+// Body: { q: "question text", models: ["gpt-4o-mini","gpt-4o","gpt-3.5-turbo"] }
+app.post("/admin/compare-models", requireAdmin, async (req, res) => {
+    try {
+        const { q = "", models = [] } = req.body || {};
+        if (!q || !Array.isArray(models) || models.length === 0) {
+            return res.status(400).json({ error: "Missing question or models array" });
+        }
+
+        // small helper to build the prompt (you can expand to include context/history)
+        const system = "You are Temple Law’s website assistant. Answer briefly and clearly using your general knowledge. If you are unsure, say 'I don't know'.";
+
+        // build shared messages
+        const messages = [
+            { role: "system", content: system },
+            { role: "user", content: `Question: ${q}\n\nAnswer succinctly.` }
+        ];
+
+        // call all models concurrently (map to promises)
+        const calls = models.map(async (model) => {
+            try {
+                const resp = await axios.post(
+                    "https://api.openai.com/v1/responses",
+                    {
+                        model,
+                        input: messages,
+                        temperature: 0.2,
+                        max_output_tokens: 500
+                    },
+                    {
+                        headers: {
+                            "Content-Type": "application/json",
+                            Authorization: `Bearer ${process.env.OPENAI_API_KEY}`
+                        }
+                    }
+                );
+
+                // extract textual answer
+                let answer = "";
+                if (resp.data.output_text) answer = resp.data.output_text;
+                else if (Array.isArray(resp.data.output)) {
+                    answer = resp.data.output.map(o => {
+                        if (Array.isArray(o.content)) return o.content.map(c => c.text ?? "").join("");
+                        if (o.content && typeof o.content === "string") return o.content;
+                        return "";
+                    }).join("\n");
+                } else if (resp.data.choices && resp.data.choices[0]?.message?.content) {
+                    answer = resp.data.choices[0].message.content;
+                }
+
+                // attempt to gather sources if any were returned in metadata (best-effort)
+                let sources = [];
+                // some of your flows attach 'sources' field — try to parse
+                if (resp.data?.metadata?.sources && Array.isArray(resp.data.metadata.sources)) {
+                    sources = resp.data.metadata.sources;
+                }
+
+                return { model, answer: (answer || "").trim(), sources, ts: new Date().toISOString() };
+            } catch (err) {
+                console.error("compare-models call failed for", model, err?.response?.data || err.message || err);
+                return { model, answer: `Error: ${err?.response?.data?.error?.message || err.message || String(err)}`, sources: [], ts: new Date().toISOString() };
+            }
+        });
+
+        const results = await Promise.all(calls);
+        return res.json({ ok: true, results });
+    } catch (e) {
+        console.error("POST /admin/compare-models error:", e.stack || e);
+        return res.status(500).json({ error: e.message || String(e) });
+    }
 });
 
 // ---------------------------------------------------------------------

@@ -5,6 +5,7 @@ import { extractCore, chunkText, sha256Hex } from "./extract.mjs";
 import { embed } from "./embeddings.mjs";
 import { XMLParser } from "fast-xml-parser";
 import pLimit from "p-limit";
+import { ObjectId } from "mongodb";
 
 // ---------- collect URLs from sitemap index ----------
 // ---------- collect URLs from sitemap index (no deprecated deps) ----------
