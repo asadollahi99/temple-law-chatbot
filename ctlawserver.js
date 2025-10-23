@@ -10,6 +10,7 @@ import crypto from "crypto";
 import { getDb } from "./db.mjs";
 import { embed, cosine } from "./embeddings.mjs";
 import { collectFromSitemap, indexUrl } from "./indexer.mjs";
+import { registerUser, loginUser, verifyToken } from "./auth.mjs";
 
 // ---------------------------------------------------------------------
 // App setup
@@ -31,8 +32,9 @@ app.use(cors({
         }
     },
     credentials: true,
-    allowedHeaders: ["Content-Type", "x-admin-token"],
+    allowedHeaders: ["Content-Type", "Authorization", "x-admin-token"],
 }));
+
 
 app.use(express.json({ limit: "2mb" }));
 app.use(morgan("tiny"));
@@ -409,7 +411,7 @@ app.post("/ask", async (req, res) => {
 // ---------------------------------------------------------------------
 // Review
 // ---------------------------------------------------------------------
-app.post("/review", requireAdmin, async (req, res) => {
+app.post("/review", verifyToken, async (req, res) => {
     try {
         const { question, correctedAnswer, force = false, sid, assistantMid, assistantContent } = req.body || {};
         if (!question || !correctedAnswer) return res.status(400).json({ error: "Missing question or correctedAnswer" });
@@ -534,7 +536,7 @@ app.get("/history", async (req, res) => {
     }
 });
 
-app.get("/admin/sessions", requireAdmin, async (req, res) => {
+app.get("/admin/sessions", verifyToken, async (req, res) => {
     const db = await getDb();
     const { q = "", from = "", to = "", limit = "25", skip = "0" } = req.query;
 
@@ -595,14 +597,14 @@ app.get("/admin/sessions", requireAdmin, async (req, res) => {
     res.json({ total, limit: L, skip: S, rows: out?.rows || [] });
 });
 
-app.get("/admin/session/:sid", requireAdmin, async (req, res) => {
+app.get("/admin/session/:sid", verifyToken, async (req, res) => {
     const db = await getDb();
     const doc = await db.collection("sessions").findOne({ sid: req.params.sid });
     if (!doc) return res.status(404).json({ error: "Not found" });
     res.json({ sid: doc.sid, createdAt: doc.createdAt, updatedAt: doc.updatedAt, history: doc.history || [] });
 });
 
-app.get("/admin/export.ndjson", requireAdmin, async (req, res) => {
+app.get("/admin/export.ndjson", verifyToken, async (req, res) => {
     const db = await getDb();
     res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
     const cur = db.collection("sessions").find({}, { sort: { updatedAt: -1 } });
@@ -610,14 +612,132 @@ app.get("/admin/export.ndjson", requireAdmin, async (req, res) => {
     res.end();
 });
 
-app.delete("/admin/session/:sid", requireAdmin, async (req, res) => {
+app.delete("/admin/session/:sid", verifyToken, async (req, res) => {
     const db = await getDb();
     const r = await db.collection("sessions").deleteOne({ sid: req.params.sid });
     res.json({ ok: true, deleted: r.deletedCount || 0 });
 });
 
+// ---------- AUTH ROUTES ----------
+import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
+
+const JWT_SECRET = process.env.JWT_SECRET || "templelawsecret";
+
+// User login
+app.post("/login", async (req, res) => {
+    try {
+        const { username, password } = req.body;
+        const db = await getDb();
+        const user = await db.collection("users").findOne({ username });
+        if (!user) return res.status(401).json({ error: "Invalid username or password" });
+        const valid = await bcrypt.compare(password, user.password);
+        if (!valid) return res.status(401).json({ error: "Invalid username or password" });
+
+        const token = jwt.sign({ username, role: user.role }, JWT_SECRET, { expiresIn: "8h" });
+        res.json({ token, role: user.role });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// Verify JWT middleware
+// function verifyToken(req, res, next) {
+//     const header = req.headers.authorization;
+//     if (!header) return res.status(401).json({ error: "No token" });
+//     const token = header.split(" ")[1];
+//     try {
+//         const decoded = jwt.verify(token, JWT_SECRET);
+//         req.user = decoded;
+//         next();
+//     } catch {
+//         res.status(401).json({ error: "Invalid token" });
+//     }
+// }
+
+// Super admin creates users
+app.get("/admin/users", verifyToken, async (req, res) => {
+    try {
+        if (req.user.role !== "superadmin") {
+            return res.status(403).json({ error: "Not authorized" });
+        }
+        const db = await getDb();
+        const users = await db.collection("users").find({}, { projection: { password: 0 } }).toArray();
+        res.json(users);
+    } catch (err) {
+        res.status(500).json({ error: err.message || String(err) });
+    }
+});
+
+// Create new user (superadmin only)
+app.post("/admin/users", verifyToken, async (req, res) => {
+    try {
+        if (req.user.role !== "superadmin") {
+            return res.status(403).json({ error: "Not authorized" });
+        }
+        const { username, password, role } = req.body;
+        if (!username || !password || !role) return res.status(400).json({ error: "Missing fields" });
+
+        const db = await getDb();
+        const existing = await db.collection("users").findOne({ username });
+        if (existing) return res.status(400).json({ error: "User already exists" });
+
+        const hashed = await bcrypt.hash(password, 10);
+        await db.collection("users").insertOne({
+            username,
+            password: hashed,
+            role,
+            createdAt: new Date(),
+        });
+        res.json({ ok: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message || String(err) });
+    }
+});
+
+// Update user (superadmin only)
+app.patch("/admin/users/:username", verifyToken, async (req, res) => {
+    try {
+        if (req.user.role !== "superadmin") {
+            return res.status(403).json({ error: "Not authorized" });
+        }
+        const { username } = req.params;
+        const { password, role } = req.body;
+        const db = await getDb();
+
+        const update = {};
+        if (password) {
+            update.password = await bcrypt.hash(password, 10);
+        }
+        if (role) update.role = role;
+        if (Object.keys(update).length === 0)
+            return res.status(400).json({ error: "Nothing to update" });
+
+        await db.collection("users").updateOne({ username }, { $set: update });
+        res.json({ ok: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message || String(err) });
+    }
+});
+
+// Delete user (superadmin only)
+app.delete("/admin/users/:username", verifyToken, async (req, res) => {
+    try {
+        if (req.user.role !== "superadmin") {
+            return res.status(403).json({ error: "Not authorized" });
+        }
+        const db = await getDb();
+        const r = await db.collection("users").deleteOne({ username: req.params.username });
+        res.json({ ok: true, deleted: r.deletedCount || 0 });
+    } catch (err) {
+        res.status(500).json({ error: err.message || String(err) });
+    }
+});
+
+
+
 // GET /admin/overrides
-app.get("/admin/overrides", requireAdmin, async (req, res) => {
+app.get("/admin/overrides", verifyToken, async (req, res) => {
     try {
         const db = await getDb();
         const q = (req.query.q || "").trim();
@@ -637,7 +757,7 @@ app.get("/admin/overrides", requireAdmin, async (req, res) => {
 });
 
 // GET /admin/override/:id
-app.get("/admin/override/:id", requireAdmin, async (req, res) => {
+app.get("/admin/override/:id", verifyToken, async (req, res) => {
     try {
         const id = req.params.id;
         if (!id) return res.status(400).json({ error: "Missing id" });
@@ -656,7 +776,7 @@ app.get("/admin/override/:id", requireAdmin, async (req, res) => {
 });
 
 // POST /admin/override (create/upsert by normQuestion)
-app.post("/admin/override", requireAdmin, async (req, res) => {
+app.post("/admin/override", verifyToken, async (req, res) => {
     try {
         const { question, answer, assistantContent = null, force = false, reviewer = null, sid = null } = req.body || {};
         if (!question || !answer) return res.status(400).json({ error: "Missing question or answer" });
@@ -695,7 +815,7 @@ app.post("/admin/override", requireAdmin, async (req, res) => {
 });
 
 // PATCH /admin/override/:id
-app.patch("/admin/override/:id", requireAdmin, async (req, res) => {
+app.patch("/admin/override/:id", verifyToken, async (req, res) => {
     try {
         const id = req.params.id;
         if (!id) return res.status(400).json({ error: "Missing id" });
@@ -737,7 +857,7 @@ app.patch("/admin/override/:id", requireAdmin, async (req, res) => {
 });
 
 // DELETE /admin/override/:id
-app.delete("/admin/override/:id", requireAdmin, async (req, res) => {
+app.delete("/admin/override/:id", verifyToken, async (req, res) => {
     try {
         const id = req.params.id;
         if (!id) return res.status(400).json({ error: "Missing id" });
@@ -755,7 +875,7 @@ app.delete("/admin/override/:id", requireAdmin, async (req, res) => {
 });
 // POST /admin/compare-models
 // Body: { q: "question text", models: ["gpt-4o-mini","gpt-4o","gpt-3.5-turbo"] }
-app.post("/admin/compare-models", requireAdmin, async (req, res) => {
+app.post("/admin/compare-models", verifyToken, async (req, res) => {
     try {
         const { q = "", models = [] } = req.body || {};
         if (!q || !Array.isArray(models) || models.length === 0) {
